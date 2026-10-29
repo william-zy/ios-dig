@@ -112,3 +112,12 @@ jobs:
           name: xnu-kernel-dig
           path: out/
           if-no-files-found: warn
+
+      # Kernel only (~18MB raw). The full artifact above carries the dSYM and
+      # linker archives and takes far longer to download on a slow link.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-kernel-min
+          path: out/kernel.development.vince
+          if-no-files-found: warn

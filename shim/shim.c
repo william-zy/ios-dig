@@ -45,21 +45,28 @@ static volatile uint32_t irq_count = 0;
 static volatile uint32_t irq_last = 0;
 
 /*
- * Previous-boot early-console capture. The prebuilt XNU kernel has been
- * binary-patched to write its early console text to 0x9e800000 and the
- * start.s stage bands to 0x9e900000. That area is outside XNU's DRAM
- * (0xa0000000+) so the kernel's VM cannot zero it, and the persistence
- * probe proved it survives the kernel's warm reset.
+ * Previous-boot early-console capture. The XNU build carries the DIG debug
+ * patches: start.s draws its stage bands into the first 32 rows of the
+ * 0x9e800000 buffer and the early console writes text into the same buffer
+ * from row 64 down. That area is outside XNU's DRAM (0xa0000000+) so the
+ * kernel's VM cannot zero it, and the persistence probe proved it survives
+ * the kernel's warm reset.
+ *
+ * Layout as shown on screen (720x1280, 24bpp, stride 2160):
+ *   rows   0..31 : start.s stage bands, 96px each, left to right:
+ *                  white=0 yellow=0A green=0B cyan=0C magenta=0D blue=0E red=0F
+ *   rows  32..63 : sweet_early_mark bars (48px each, greenish)
+ *   rows  64..   : early console text
  */
 #define CAPTURE_TEXT_BASE	0x9e800000UL
-#define CAPTURE_STAGE_BASE	0x9e900000UL
 #define CAPTURE_SIZE		((uint64_t)FB_H * FB_STRIDE)
+#define CAPTURE_CLEAR_SIZE	0x40000UL
 
 static int capture_present(void)
 {
-	volatile uint8_t *p = (volatile uint8_t *)CAPTURE_STAGE_BASE;
-	/* stage 0 writes a white 48x32 band: 144 bytes of 0xff per row */
-	for (int i = 0; i < 144; i++) {
+	volatile uint8_t *p = (volatile uint8_t *)CAPTURE_TEXT_BASE;
+	/* stage 0 writes a white 96x32 band: 288 bytes of 0xff per row */
+	for (int i = 0; i < 288; i++) {
 		if (p[i] != 0xff)
 			return 0;
 	}
@@ -74,20 +81,21 @@ static void capture_dump(void)
 		dst[i] = src[i];
 	__asm__ volatile("dsb sy" ::: "memory");
 
-	/* Clear the stage band so the next boot runs the payload again instead
-	 * of showing this same capture forever. Clean the cache line: the
-	 * shim runs with the D-cache on and the band lives in DRAM. */
-	volatile uint8_t *band = (volatile uint8_t *)CAPTURE_STAGE_BASE;
-	for (int i = 0; i < 144; i++)
-		band[i] = 0;
+	/* Clear bands and the first text rows so the next boot runs the payload
+	 * again instead of showing this same capture forever. Clean the cache:
+	 * the shim runs with the D-cache on and the buffer lives in DRAM. */
+	volatile uint64_t *clr = (volatile uint64_t *)CAPTURE_TEXT_BASE;
+	for (uint64_t i = 0; i < CAPTURE_CLEAR_SIZE / 8; i++)
+		clr[i] = 0;
 	__asm__ volatile("dsb sy" ::: "memory");
-	for (uintptr_t a = (uintptr_t)band & ~63UL; a < (uintptr_t)band + 144; a += 64)
+	for (uintptr_t a = CAPTURE_TEXT_BASE; a < CAPTURE_TEXT_BASE + CAPTURE_CLEAR_SIZE; a += 64)
 		__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
 	__asm__ volatile("dsb sy" ::: "memory");
 
 	con_goto(FB_H / 32 - 4);
 	con_str("CAPTURE", "previous early console");
-	con_str("STAGES", "white=0 yellow=0A green=0B cyan=0C");
+	con_str("STAGES", "top: 0=W 0A=Y 0B=G 0C=C 0D=M 0E=B 0F=R");
+	con_str("MARKS", "row32+: sweet_early_mark stages");
 	con_str("NOTE", "power off; capture shown");
 	while (1)
 		__asm__ volatile("wfi");

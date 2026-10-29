@@ -12,9 +12,14 @@ GH="../../tools/gh/bin/gh.exe"
 RUN_ID="${1:?usage: ci-test.sh RUN_ID}"
 
 mkdir -p xnu/out/ci
-"$GH" run download "$RUN_ID" -n xnu-kernel-dig -D xnu/out/ci
+rm -rf xnu/out/ci/*
+# Prefer the kernel-only artifact: the full one carries the dSYM and is ~62MB.
+if ! "$GH" run download "$RUN_ID" -n xnu-kernel-min -D xnu/out/ci; then
+    echo "[!] xnu-kernel-min not available, falling back to xnu-kernel-dig"
+    "$GH" run download "$RUN_ID" -n xnu-kernel-dig -D xnu/out/ci
+fi
 
-KERNEL=$(find xnu/out/ci -type f -name 'kernel.development.*' | head -1)
+KERNEL=$(find xnu/out/ci -type f -name 'kernel.development.vince' | head -1)
 if [ -z "$KERNEL" ]; then
     echo "no kernel.development.* in the artifact; listing:"
     find xnu/out/ci -type f -maxdepth 3 -print

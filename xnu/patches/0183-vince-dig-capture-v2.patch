@@ -1,0 +1,113 @@
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index 4ccbe44..07d750c 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1842,7 +1842,8 @@ sweet_early_map_final(void)
+ 	assert((l1 & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) == (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE));
+ 	tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
+ #if defined(VINCE)
+-	const uint64_t fb_phys_base = 0x90000000ULL;
++	/* DIG: keep the early console on the 0x9e800000 capture buffer after TTBR0 teardown */
++	const uint64_t fb_phys_base = 0x9e800000ULL;
+ 	const unsigned int fb_num_blocks = 4;
+ #else
+ 	const uint64_t fb_phys_base = 0x9c000000ULL;
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index d802db1..d85e849 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -582,11 +582,11 @@ start_cpu:
+ 	/* boot CPU only (x21 = 0): secondaries come through common_start with x21 = their cpu data */
+ 	cbnz	x21, 9f
+ 	movz	x9, #0x0000
+-	movk	x9, #0x9e90, lsl #16
+-	add		x9, x9, #(\x_start * 3)
++	movk	x9, #0x9e80, lsl #16
++	add		x9, x9, #(\x_start * 6)
+ 	mov		x10, #32
+ 1:
+-	mov		x11, #(48 * 3)
++	mov		x11, #(96 * 3)
+ 	mov		x12, x9
+ 2:
+ 	mov		w13, #\r
+@@ -597,7 +597,7 @@ start_cpu:
+ 	strb	w13, [x12], #1
+ 	subs	x11, x11, #3
+ 	b.ne	2b
+-	add		x9, x9, #3240
++	add		x9, x9, #2160
+ 	subs	x10, x10, #1
+ 	b.ne	1b
+ 	dsb		sy
+@@ -817,7 +817,26 @@ Lkernelcache_base_found:
+ 	subs	x15, x15, #1
+ 	b.ne	1b
+ 
+-	/* Stage 0B: green 48x32 band - bootstrap V=P, KVA and FB mapped */
++	/*
++	 * DIG early-console capture: 2x 2MB Normal-NC blocks at 0x9e800000 in
++	 * the same V=P L2 table. The stage marks and the early console write
++	 * here; without this mapping the post-MMU marks (0E/0F) and every
++	 * early_putc after SCTLR_EL1 would fault.
++	 */
++	MOV64	x10, 0x9e800000
++	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
++	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
++	add		x13, x25, #(2 * PGBYTES)
++	mov		x15, #2
++1:
++	orr		x11, x14, x10
++	str		x11, [x13, x12, lsl #TTE_SHIFT]
++	add		x10, x10, #0x200, lsl #12
++	add		x12, x12, #1
++	subs	x15, x15, #1
++	b.ne	1b
++
++	/* Stage 0B: green 96x32 band - bootstrap V=P, KVA, FB and capture mapped */
+ 	VINCE_STAGE_MARK 0x00, 0xff, 0x00, 96
+ #elif defined(SWEET)
+ 	/*
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 7be3f4e..1a211d4 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -27,11 +27,8 @@ void
+ sweet_early_relocate(uint64_t base)
+ {
+ 	sweet_early_mark(8, "leaving bootstrap TTBR0");
+-#if defined(VINCE)
+-	early_fb = (volatile uint8_t *)(uintptr_t)(base + 0x1000);
+-#else
++	/* DIG: the capture buffer is mapped at its physical base, so no 0x1000 skew */
+ 	early_fb = (volatile uint8_t *)(uintptr_t)base;
+-#endif
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	sweet_early_mark(9, "kernel framebuffer VA live");
+ }
+@@ -44,7 +41,12 @@ sweet_early_relocate(uint64_t base)
+ 
+ extern unsigned char iso_font[256 * 16];
+ 
++#if defined(VINCE)
++/* rows 0..63 hold the stage/mark bands; text starts at y = 64 */
++static unsigned int early_row = 2, early_col;
++#else
+ static unsigned int early_row, early_col;
++#endif
+ static unsigned int early_started, early_disabled, early_panicking;
+ 
+ static void
+@@ -162,9 +164,10 @@ sweet_early_mark(unsigned int stage, const char *label)
+ 		return;
+ 	}
+ #if defined(VINCE)
+-	for (unsigned int y = EARLY_HEIGHT - 32; y < EARLY_HEIGHT; y++) {
++	/* rows 32..63: one 48px bar per mark stage, above the text area */
++	for (unsigned int y = 32; y < 64; y++) {
+ 		volatile uint8_t *line = early_fb + y * EARLY_STRIDE;
+-		for (unsigned int x = stage * 48; x < (stage + 1) * 48; x++) {
++		for (unsigned int x = stage * 48; x < (stage + 1) * 48 && x < EARLY_WIDTH; x++) {
+ 			line[x * 3 + 0] = 0x00;
+ 			line[x * 3 + 1] = 0xff;
+ 			line[x * 3 + 2] = (stage & 7u) * 32u;
