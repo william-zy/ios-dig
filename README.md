@@ -15,9 +15,26 @@ live 设备树（`docs/硬件档案-DIG-AL00-20261029.md`）。
 | `tools/mkadt_dig.py` + 校验 | ✅ 生成 10,780 B ADT，7 项检查全过 |
 | `artifacts/dig-shim-boot.img` | ✅ 421,888 B，header v0 / page 2048，地址与 stock boot.img 完全一致 |
 | DIG-AL00 单板 DTB 提取 | ✅ `dtb/dig-al00.dtb`（stock.dtb 7 个板型中的第 3 个，254,246 B） |
-| 真机 shim 诊断 | ⏳ 未刷（镜像已就绪，步骤见下） |
-| XNU 补丁移植 | ❌ 未开始（`xnu/patches/` 是 vince 178 补丁基线，对照表见 `PORTING.md`） |
+| 真机 shim 诊断 | ✅ **2026-10-30 通过**（10 行全部显示，initrd 通路确认） |
+| loader/交接验证 | ✅ 微型 payload 在 0xa0000000 执行（绿条 + 签名）；OSLAR/DAIF/boot_args 均正常 |
+| 早期 console 捕获 | ✅ 0x9e800000/0x9e900000 捕获通路实测可用（热复位保留 DRAM） |
+| 预编译 vince 内核 | ❌ 未跑到第一条 stage 标记；诊断结论见 `docs/实测记录-20261030-XNU引导诊断.md` |
+| 自有 CI（GitHub macOS） | 🔄 **构建中**：https://github.com/william-zy/ios-dig（workflow `xnu-dig`） |
+| XNU 补丁移植 | 🔄 0182 调试补丁已加（stage marks/early console → 捕获区）；其余见 `PORTING.md` |
 | GPU（Adreno 505） | 📋 分析完成，结论见 `docs/GPU-移植分析.md` |
+
+## CI 构建（2026-10-30）
+
+- 仓库：**https://github.com/william-zy/ios-dig**（public，macOS runner 免费）
+- workflow：`.github/workflows/xnu-dig.yml`，macOS 14，`MACHINE_CONFIG=VINCE`
+- 调试补丁：`xnu/patches/0182-vince-dig-early-capture.patch`
+  - `start.s` 的 `VINCE_STAGE_MARK` 基址 0x90694480 → **0x9e900000**
+  - `sweet_early.c` 的早期 console → **0x9e800000 / 720×1280 / stride 2160**
+  - 效果：内核的早期进度会写进 shim 的捕获区；下次启动 shim 直接显示彩色 stage 条
+- 下载产物并打包：`bash tools/ci-test.sh RUN_ID`（产物名 `xnu-kernel-dig`）
+
+> 注意：`xnu/patches/` 是 ios-vince 2026-10-28 的 178 补丁状态，它的 CI 产物曾只有 136 B
+> （构建失败）。如果本次构建在编译阶段失败，先按日志裁掉/修正问题补丁，再迭代。
 
 ## 关键地址（来自 live DT）
 

@@ -55,55 +55,6 @@ static volatile uint32_t irq_last = 0;
 #define CAPTURE_STAGE_BASE	0x9e900000UL
 #define CAPTURE_SIZE		((uint64_t)FB_H * FB_STRIDE)
 
-/* Tiny handover-test payload signature (shim/tiny.S, tools/mktiny.py). */
-#define TINY_SIG		0x00594e4954474944ULL	/* "DIGTINY" */
-
-static void tiny_check(void)
-{
-	volatile uint64_t *p = (volatile uint64_t *)CAPTURE_TEXT_BASE;
-
-	if (*p == TINY_SIG) {
-		con_str("TINY", "previous payload executed OK");
-		*p = 0;		/* allow the next test payload to run */
-	}
-}
-
-/* Full-XNU-copy stub test (shim/stub.S, tools/mkstub.py). */
-#define STUB_START_SIG		0x0032555453494744ULL	/* "DIGSTU2" */
-#define STUB_DONE_SIG		0x0033555453494744ULL	/* "DIGSTU3" */
-
-static void cache_clean(void *addr, unsigned long len)
-{
-	uintptr_t a = (uintptr_t)addr & ~63UL;
-	for (; a < (uintptr_t)addr + len; a += 64)
-		__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
-	__asm__ volatile("dsb sy" ::: "memory");
-}
-
-static void stub_check(void)
-{
-	volatile uint64_t *start = (volatile uint64_t *)0x9e800800UL;
-	volatile uint64_t *done = (volatile uint64_t *)0x9e800808UL;
-	volatile uint64_t *val = (volatile uint64_t *)CAPTURE_TEXT_BASE;
-
-	if (*done == STUB_DONE_SIG) {
-		con_hex("ENTRY", *val);
-		con_str("STUB", "read + store completed");
-		*done = 0;
-		*start = 0;
-		cache_clean((void *)0x9e800800UL, 16);
-		while (1)
-			__asm__ volatile("wfi");
-	}
-	if (*start == STUB_START_SIG) {
-		con_str("STUB", "started but did not complete (fault)");
-		*start = 0;
-		cache_clean((void *)0x9e800800UL, 16);
-		while (1)
-			__asm__ volatile("wfi");
-	}
-}
-
 static int capture_present(void)
 {
 	volatile uint8_t *p = (volatile uint8_t *)CAPTURE_STAGE_BASE;
@@ -135,7 +86,11 @@ static void capture_dump(void)
 	__asm__ volatile("dsb sy" ::: "memory");
 
 	con_goto(FB_H / 32 - 4);
-	con_str("CAPTURE", "previous early console (continuing)");
+	con_str("CAPTURE", "previous early console");
+	con_str("STAGES", "white=0 yellow=0A green=0B cyan=0C");
+	con_str("NOTE", "power off; capture shown");
+	while (1)
+		__asm__ volatile("wfi");
 }
 
 void gicv2_init(void)
@@ -223,11 +178,7 @@ void shim_main(void *fdt)
 	mmu_enable(&info);
 	con_str("MMU",     "4 KiB Granule Active (TTBR0)");
 
-	/* 2b. Tiny handover test signature from the previous boot? */
-	tiny_check();
-	stub_check();
-
-	/* 2c. If the previous boot left an early-console capture, show it and stop */
+	/* 2b. If the previous boot left an early-console capture, show it and stop */
 	if (capture_present())
 		capture_dump();
 
