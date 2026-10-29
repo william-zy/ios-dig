@@ -1,0 +1,24 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -18,6 +18,6 @@
+ #if defined(VINCE)
+-#define EARLY_FB_PHYS 0x90001000ULL
+-#define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2160u
+-#define EARLY_STRIDE 3240u
++#define EARLY_FB_PHYS 0x9e800000ULL
++#define EARLY_WIDTH 720u
++#define EARLY_HEIGHT 1280u
++#define EARLY_STRIDE 2160u
+ #define EARLY_BPP 3u
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -351,4 +351,4 @@
+ .macro VINCE_STAGE_MARK r, g, b, x_start
+-	movz	x9, #0x4480
+-	movk	x9, #0x9069, lsl #16
++	movz	x9, #0x0000
++	movk	x9, #0x9e90, lsl #16
+ 	add		x9, x9, #(\x_start * 3)
