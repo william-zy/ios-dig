@@ -62,9 +62,19 @@ static volatile uint32_t irq_last = 0;
 #define CAPTURE_SIZE		((uint64_t)FB_H * FB_STRIDE)
 #define CAPTURE_CLEAR_SIZE	0x40000UL
 
+/* The capture area is mapped WB here; a warm reset can keep stale lines in
+ * the cache, which would hide what the kernel wrote. Drop them before read. */
+static void capture_invalidate(void)
+{
+	for (uintptr_t a = CAPTURE_TEXT_BASE; a < CAPTURE_TEXT_BASE + 0x1000; a += 64)
+		__asm__ volatile("dc ivac, %0" : : "r"(a) : "memory");
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
 static int capture_present(void)
 {
 	volatile uint8_t *p = (volatile uint8_t *)CAPTURE_TEXT_BASE;
+	capture_invalidate();
 	/* stage 0 writes a white 96x32 band: 288 bytes of 0xff per row */
 	for (int i = 0; i < 288; i++) {
 		if (p[i] != 0xff)
@@ -179,7 +189,12 @@ void shim_main(void *fdt)
 	con_str("PROJECT", "iOS-SWEET -> DIG-AL00 Port");
 	con_str("DEVICE",  "Huawei Enjoy 6S (MSM8940)");
 	con_str("CPU",     "8x Cortex-A53 ARMv8.0-A");
+	con_hex("MPIDR",   rsr("mpidr_el1"));
+	con_hex("MIDR",    rsr("midr_el1"));
 	con_hex("FDT",     (uintptr_t)fdt);
+	/* MMU still off here: this is an uncached physical read of the capture
+	 * buffer, i.e. exactly what the previous kernel left in DRAM. */
+	con_hex("CAP0",    *(volatile uint64_t *)CAPTURE_TEXT_BASE);
 
 	/* 2. Setup 4KB Translation Granule MMU */
 	struct mmu_info info;

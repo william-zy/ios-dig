@@ -30,6 +30,9 @@ MEM_SIZE = 0x60000000           # 1.5 GiB
 
 PANIC_LOG_SIZE = 0x100000       # 1 MiB panic log at the top of bank 1
 
+# MPIDR of the CPU LK hands control to (cluster 1 core 0, measured on device)
+BOOT_CPU_MPIDR = 0x100
+
 # Non-zero SOC base for arm-io so pe_arm_get_soc_base_phys() returns non-zero
 SOC_BASE = 0x01000000
 
@@ -120,6 +123,10 @@ def build_dig_adt(seed=None, phys_base=None, mem_size=None):
         ('#interrupt-cells', u32(3)),
         ('virtual-timer-intid', u32(VTIMER_INTID)),
     ])
+    # Device nodes must name their interrupt controller: IODTFindInterruptParent
+    # otherwise falls back to the DT parent, which has no #interrupt-cells and
+    # makes IOKit warn on every mapping attempt.
+    gic_ph = struct.unpack('<I', gic.prop('AAPL,phandle'))[0]
 
     # Alias for any lookup of /arm-io/gic
     gic_alias = node('gic', [
@@ -154,6 +161,7 @@ def build_dig_adt(seed=None, phys_base=None, mem_size=None):
         ph(),
         ('compatible', cstr('generic-sdhci') + cstr('qcom,sdhci-msm-v4') + b'\0'),
         ('reg', u64(SDHCI, SDHCI_SIZE)),
+        ('interrupt-parent', u32(gic_ph)),
         ('interrupts', u32(0, 123, 4)),  # SPI 123
     ])
 
@@ -163,6 +171,7 @@ def build_dig_adt(seed=None, phys_base=None, mem_size=None):
         ('compatible', cstr('focaltech,5336') + b'\0'),
         ('i2c-address', u32(0x38)),
         ('i2c-bus', u32(3)),
+        ('interrupt-parent', u32(gic_ph)),
         ('interrupts', u32(0, 65, 2)),  # GPIO 65 (ftech,irq-gpio)
     ])
 
@@ -223,22 +232,26 @@ def build_dig_adt(seed=None, phys_base=None, mem_size=None):
         ('opposed-power-vol-buttons', u32(1)),
     ])
 
-    # 8x Cortex-A53 in two clusters (MPIDR 0x0-0x3, 0x100-0x103). CPU1 is left
-    # out for now, matching the vince bring-up layout (7 cores started by
-    # SweetCPU through PSCI); it can be added once the port is stable.
+    # Stock DIG-AL00 DTB: 8x Cortex-A53, MPIDR 0x0-0x3 (cluster 0) and
+    # 0x100-0x103 (cluster 1). LK boots us on cluster 1 core 0 (MPIDR 0x100,
+    # measured on the device via the shim), so that node carries
+    # state="running"; ml_parse_cpu_topology() uses it to pick the boot CPU.
+    # The payload cmdline still says cpus=1, so only that CPU enters the
+    # topology for now.
     cpu_nodes = []
-    for core in (0, 2, 3, 4, 5, 6, 7):
+    for core in range(8):
+        mpidr = core if core < 4 else 0x100 + core - 4
         c = node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
             ('compatible', cstr('qcom,cortex-a53') + cstr('ARM,v8') + b'\0'),
-            ('reg', u32(core if core < 4 else 0x100 + core - 4)),
+            ('reg', u32(mpidr)),
             ('cpu-id', u32(core)),
             ('cluster-id', u32(0 if core < 4 else 1)),
             ('cluster-type', u32(0)),
             ('die-cluster-id', u32(0)),
             ('cluster-core-id', u32(core % 4)),
-            ('state', cstr('running' if core == 0 else 'stopped')),
+            ('state', cstr('running' if mpidr == BOOT_CPU_MPIDR else 'stopped')),
             ('timebase-frequency', u32(TIMEBASE)),
             ('clock-frequency', u32(1400000000)),
             ('bus-frequency', u32(100000000)),
@@ -269,7 +282,7 @@ def build_dig_adt(seed=None, phys_base=None, mem_size=None):
 
     root = node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('huawei,dig-al00') + cstr('qcom,msm8940') + cstr('AppleARM') + b'\0'),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,vince') + cstr('huawei,dig-al00') + cstr('qcom,msm8940') + cstr('AppleARM') + b'\0'),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('dig')),
         ('target-sub-type', cstr('dig')),
