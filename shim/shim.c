@@ -111,6 +111,77 @@ static void capture_dump(void)
 		__asm__ volatile("wfi");
 }
 
+/*
+ * Embedded panic log (pram at 0xdff00000, see XNU's embedded_panic_header):
+ * magic "FUNK", eph_panic_log_offset at +16, eph_panic_log_len at +20.
+ * After a panic the kernel writes the full log (panic string + backtrace)
+ * there; the screen only keeps the tail because the fbcon wraps.
+ */
+#define PANIC_BASE		0xdff00000UL
+#define PANIC_SIZE		0x100000UL
+#define PANIC_MAGIC		0x46554E4BUL	/* "FUNK" */
+
+static int paniclog_present(void)
+{
+	/* The kernel wrote the header through its own mapping; drop any stale
+	 * line this shim could have cached on an earlier boot. */
+	for (uintptr_t a = PANIC_BASE; a < PANIC_BASE + 0x1000; a += 64)
+		__asm__ volatile("dc ivac, %0" : : "r"(a) : "memory");
+	__asm__ volatile("dsb sy" ::: "memory");
+	return *(volatile uint32_t *)PANIC_BASE == PANIC_MAGIC;
+}
+
+static void paniclog_dump(void)
+{
+	volatile uint8_t *base = (volatile uint8_t *)PANIC_BASE;
+	uint32_t off = *(volatile uint32_t *)(PANIC_BASE + 16);
+	uint32_t len = *(volatile uint32_t *)(PANIC_BASE + 20);
+	int line = 0, col = 0;
+	char buf[46];
+
+	if (off < 40 || off >= PANIC_SIZE || len == 0 || len > PANIC_SIZE - off)
+		return;
+
+	/* Drop stale lines over the log text before reading it. */
+	for (uintptr_t a = PANIC_BASE; a < PANIC_BASE + PANIC_SIZE; a += 64)
+		__asm__ volatile("dc ivac, %0" : : "r"(a) : "memory");
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	con_clear(0x00102040);
+	con_str("PANICLOG", "embedded panic log, first lines");
+	line = 1;
+	for (uint32_t i = 0; i < len && line < 39; i++) {
+		char c = (char)base[off + i];
+		if (c == '\r')
+			continue;
+		if (c == '\n' || col >= 45) {
+			buf[col] = 0;
+			con_raw_line(buf);
+			col = 0;
+			line++;
+			if (c == '\n')
+				continue;
+		}
+		buf[col++] = (c >= 0x20 && c <= 0x7e) ? c : '.';
+	}
+	if (col && line < 39) {
+		buf[col] = 0;
+		con_raw_line(buf);
+	}
+
+	/* Clear the magic so the next boot runs the payload again. */
+	*(volatile uint32_t *)PANIC_BASE = 0;
+	__asm__ volatile("dsb sy" ::: "memory");
+	for (uintptr_t a = PANIC_BASE; a < PANIC_BASE + 64; a += 64)
+		__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+	__asm__ volatile("dsb sy" ::: "memory");
+
+	con_goto(FB_H / 32 - 2);
+	con_str("NOTE", "panic log shown; power off");
+	while (1)
+		__asm__ volatile("wfi");
+}
+
 void gicv2_init(void)
 {
 	/* Enable GIC Distributor */
@@ -201,7 +272,11 @@ void shim_main(void *fdt)
 	mmu_enable(&info);
 	con_str("MMU",     "4 KiB Granule Active (TTBR0)");
 
-	/* 2b. If the previous boot left an early-console capture, show it and stop */
+	/* 2b. If the previous boot left a panic log, show it and stop */
+	if (paniclog_present())
+		paniclog_dump();
+
+	/* 2c. If the previous boot left an early-console capture, show it and stop */
 	if (capture_present())
 		capture_dump();
 

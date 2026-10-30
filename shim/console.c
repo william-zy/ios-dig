@@ -110,6 +110,12 @@ void con_str_color(const char *label, const char *s, uint32_t color)
 	row++;
 }
 
+void con_raw_line(const char *s)
+{
+	put_str(0, s, WHITE);
+	row++;
+}
+
 void con_hex(const char *label, uint64_t v)
 {
 	char buf[17];
