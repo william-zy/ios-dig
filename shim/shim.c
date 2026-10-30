@@ -102,14 +102,8 @@ static void capture_dump(void)
 		__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
 	__asm__ volatile("dsb sy" ::: "memory");
 
-	con_goto(FB_H / 32 - 4);
-	con_str("CAPTURE", "previous early console");
-	con_str("STAGES", "top: 0=W 0A=Y 0B=G 0C=C 0D=M 0E=B 0F=R");
-	con_str("MARKS", "row32+: sweet_early_mark stages");
-	con_str("NOTE", "power off; capture shown");
-	while (1)
-		__asm__ volatile("wfi");
-}
+		con_str("CAPTURE", "previous early console cleared");
+	}
 
 /*
  * Embedded panic log (pram at 0xdff00000, see XNU's embedded_panic_header):
@@ -176,11 +170,8 @@ static void paniclog_dump(void)
 		__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
 	__asm__ volatile("dsb sy" ::: "memory");
 
-	con_goto(FB_H / 32 - 2);
-	con_str("NOTE", "panic log shown; power off");
-	while (1)
-		__asm__ volatile("wfi");
-}
+		con_str("NOTE", "panic log shown; continuing boot");
+	}
 
 void gicv2_init(void)
 {

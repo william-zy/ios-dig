@@ -4062,12 +4062,20 @@ index 0000000..a62416c
 +		return false;
 +	}
 +	int native = 0;
++	/* DIG-AL00 is a 720x1280 panel. The vince defaults (1125x2436)
++	 * made backboardd allocate an iPhone X surface that never maps onto it.
++	 * sweetfb_native=1 now means "report the boot framebuffer size"; without
++	 * it the old vince logical size is kept. */
 +	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
-+	fLogicalW = fWidth;
-+	fLogicalH = fHeight;
-+	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	if (native) {
++		fLogicalW = fWidth;
++		fLogicalH = fHeight;
++	} else if (fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
 +		fLogicalW = SWEET_FB_LOGICAL_W;
 +		fLogicalH = SWEET_FB_LOGICAL_H;
++	} else {
++		fLogicalW = fWidth;
++		fLogicalH = fHeight;
 +	}
 +	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
 +	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
@@ -26939,11 +26947,13 @@ index 0000000..27bc49d
 +		return false;
 +	}
 +	int native = 0;
++	/* Match SweetFramebuffer: native reports the real DIG panel, not the
++	 * vince 1080x2400 digitizer. Touch input itself stays disabled. */
 +	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
-+	fLogicalW = native ? 1080 : 1125;
-+	fLogicalH = native ? 2400 : 2436;
-+	fOffX = (fLogicalW - 1080) / 2;
-+	fOffY = (fLogicalH - 2400) / 2;
++	fLogicalW = native ? 720 : 1125;
++	fLogicalH = native ? 1280 : 2436;
++	fOffX = native ? 0 : (fLogicalW - 1080) / 2;
++	fOffY = native ? 0 : (fLogicalH - 2400) / 2;
 +	/* The digitizer covers the main display (backboardd maps it 1:1). */
 +	setProperty("DisplayIntegrated", kOSBooleanTrue);
 +	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
