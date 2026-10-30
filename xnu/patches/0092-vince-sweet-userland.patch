@@ -26947,13 +26947,11 @@ index 0000000..27bc49d
 +		return false;
 +	}
 +	int native = 0;
-+	/* Match SweetFramebuffer: native reports the real DIG panel, not the
-+	 * vince 1080x2400 digitizer. Touch input itself stays disabled. */
 +	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
-+	fLogicalW = native ? 720 : 1125;
-+	fLogicalH = native ? 1280 : 2436;
-+	fOffX = native ? 0 : (fLogicalW - 1080) / 2;
-+	fOffY = native ? 0 : (fLogicalH - 2400) / 2;
++	fLogicalW = native ? 1080 : 1125;
++	fLogicalH = native ? 2400 : 2436;
++	fOffX = (fLogicalW - 1080) / 2;
++	fOffY = (fLogicalH - 2400) / 2;
 +	/* The digitizer covers the main display (backboardd maps it 1:1). */
 +	setProperty("DisplayIntegrated", kOSBooleanTrue);
 +	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
