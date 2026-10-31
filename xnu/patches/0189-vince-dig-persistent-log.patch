@@ -1,0 +1,136 @@
+diff --git a/bsd/dev/vince_mmc.c b/bsd/dev/vince_mmc.c
+--- a/bsd/dev/vince_mmc.c
++++ b/bsd/dev/vince_mmc.c
+@@ -57,3 +57,5 @@
+ #include <kern/locks.h>
+ #include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
+ #include <pexpert/pexpert.h>
+@@ -63,3 +63,5 @@
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern int hz;
++extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
+ 
+ #define SDCC1_PHYS      0x07824000ul    /* MCI core; the SDHCI registers start at +0x900 */
+@@ -512,6 +512,111 @@
+ 	printf("VINCE MMC: no GPT partition named \"%s\"\n", want);
+ 	return ENOENT;
+ }
+ 
++/*
++ * Persistent console log: sweet_ufs.c keeps every console byte in a 4 MiB
++ * ring; this thread copies it, in order, to the last 4 MiB + one block of the
++ * partition (far past the HFS image). Block 0 of the area is a header:
++ *   "SWEETLOG" | u32 version | u32 size | u64 total | u64 sequence
++ * The data follows, starting at block 1. Read it from recovery with
++ * tools/dig-log-pull.sh. Disabled with boot-arg sweetlog=0.
++ */
++#define DIG_LOG_AREA    (4u << 20)
++#define DIG_LOG_BLOCKS  (DIG_LOG_AREA / SECTOR)
++#define DIG_LOG_SECS    2
++
++struct dig_log_header {
++	char magic[8];
++	uint32_t version, size;
++	uint64_t total, seq;
++};
++
++static int vince_log_chan;
++
++static void
++vince_log_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint64_t base = vm.nsect - DIG_LOG_BLOCKS - 1;
++	static char stage[MAX_SECTORS * SECTOR];
++	uint32_t stage_len = 0;
++	uint64_t pos = 0, disk = 0, seq = 0;
++
++	printf("VINCE LOG: console log at the last %u KiB of the partition (block 0x%llx)\n",
++	    (DIG_LOG_BLOCKS + 1) * SECTOR >> 10, base);
++	for (;;) {
++		(void)tsleep(&vince_log_chan, PZERO, "vincelog", hz * DIG_LOG_SECS);
++		while (stage_len < sizeof(stage)) {
++			uint32_t n = sweet_log_copy(&pos, stage + stage_len,
++			    (uint32_t)sizeof(stage) - stage_len);
++			if (n == 0) {
++				break;
++			}
++			stage_len += n;
++		}
++		if (stage_len == 0) {
++			continue;
++		}
++		uint32_t sectors = stage_len / SECTOR;
++		uint32_t tail = stage_len - sectors * SECTOR;
++		uint32_t done = 0;
++		int error = 0;
++
++		lck_mtx_lock(&vince_mmc_lock);
++		while (done < sectors && !error) {
++			uint32_t n = MIN(sectors - done, MAX_SECTORS);
++			memcpy(vince_mmc_bounce, stage + (uint64_t)done * SECTOR, n * SECTOR);
++			error = mmc_write_sectors(base + 1 + (disk / SECTOR) + done, n);
++			done += n;
++		}
++		if (!error && tail) {
++			/* Show the partial sector now; the next round rewrites it. */
++			bzero(vince_mmc_bounce, SECTOR);
++			memcpy(vince_mmc_bounce, stage + sectors * SECTOR, tail);
++			error = mmc_write_sectors(base + 1 + (disk / SECTOR) + sectors, 1);
++		}
++		if (!error) {
++			struct dig_log_header h;
++			bzero(&h, sizeof(h));
++			memcpy(h.magic, "SWEETLOG", 8);
++			h.version = 1;
++			h.size = DIG_LOG_AREA;
++			h.total = pos;
++			h.seq = ++seq;
++			bzero(vince_mmc_bounce, SECTOR);
++			memcpy(vince_mmc_bounce, &h, sizeof(h));
++			error = mmc_write_sectors(base, 1);
++		}
++		lck_mtx_unlock(&vince_mmc_lock);
++		if (error) {
++			printf("VINCE LOG: write failed (%d), stopping\n", error);
++			break;
++		}
++		disk += (uint64_t)sectors * SECTOR;
++		if (tail) {
++			memmove(stage, stage + sectors * SECTOR, tail);
++		}
++		stage_len = tail;
++		if (disk >= DIG_LOG_AREA) {
++			printf("VINCE LOG: area full at %llu bytes\n", disk);
++			break;
++		}
++	}
++}
++
++static void
++vince_log_start(void)
++{
++	int on = 1;
++	thread_t thread;
++
++	(void)PE_parse_boot_argn("sweetlog", &on, sizeof(on));
++	if (!on || !vm.rw || vm.nsect < 2 * (DIG_LOG_BLOCKS + 1)) {
++		return;
++	}
++	if (kernel_thread_start(vince_log_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++
+ /* What the partition holds, for the log: the superblock magics at offset 1024 (HFS+, ext4, F2FS). */
+ static const char *
+@@ -828,7 +828,8 @@
+ 	printf("VINCE MMC: \"%s\" at sector 0x%llx, %llu MiB, %s, %s (8-bit HS 50 MHz, PIO)\n",
+ 	    want, vm.first, vm.nsect * SECTOR >> 20, fs, vm.rw ? "read-write" : "read-only");
++	vince_log_start();
+ 	return 0;
+ }
+ 
+ /* Root device for rd=mmcroot0, and the mmcprobe=1 check (IOFindBSDRoot). */
+ int vince_mmc_rootdev(dev_t *dev);
