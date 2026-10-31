@@ -43,8 +43,9 @@ env:
 
 jobs:
   build:
-    # macos-14 ships Xcode 15.x whose iig matches the xnu-8796 IORPC ABI
-    runs-on: macos-14
+    # macos-14 is in its retirement brownout until 2026-11-02. macOS 15 is the
+    # oldest recommended replacement; its oldest installed Xcode is selected below.
+    runs-on: macos-15
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
