@@ -63,12 +63,10 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 +		qup_clk_ctl = CLK_CTL_100K;
 +		r = ft_read(0xa3, &id, 1);
 +	}
-+	printf("VINCE INPUT: FocalTech at %#x chip id %#x (read %d), %d points max
-",
++	printf("VINCE INPUT: FocalTech at %#x chip id %#x (read %d), %d points max\n",
 +	    FT_ADDR, id, r, FT_MAX_POINTS);
 +	if (r) {
-+		printf("VINCE INPUT: no FocalTech answer; touch off
-");
++		printf("VINCE INPUT: no FocalTech answer; touch off\n");
 +		goto out;
 +	}
 +
@@ -101,8 +99,7 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 +		}
 +		if (r) {
 +			if ((errors++ % 100u) == 0) {
-+				printf("VINCE INPUT: FocalTech read error %d (i2c %#x qup %#x)
-", r,
++				printf("VINCE INPUT: FocalTech read error %d (i2c %#x qup %#x)\n", r,
 +				    in_rd(qup, QUP_I2C_STATUS), in_rd(qup, QUP_ERROR_FLAGS));
 +			}
 +			if (errors == 5) {
