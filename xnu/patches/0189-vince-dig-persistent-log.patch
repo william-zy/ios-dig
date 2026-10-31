@@ -7,31 +7,34 @@ diff --git a/bsd/dev/vince_mmc.c b/bsd/dev/vince_mmc.c
 +#include <kern/thread.h>
 +#include <kern/sched_prim.h>
  #include <pexpert/pexpert.h>
-@@ -39,6 +39,8 @@
+@@ -39,6 +39,9 @@
  /* bsd/dev/vince_ctl.c: clean halt when the shim asks (tools/vince_halt.py) */
  extern void vince_ctl_start(void);
  extern void vince_smd_start(void);
-+extern int hz;
-+extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
++/* osfmk/console/serial_console.c: every console byte, 8 MiB ring */
++extern char vince_conlog[1 << 23];
++extern volatile uint64_t vince_conlog_pos;
  
  #define SDCC1_PHYS      0x07824000ul    /* MCI core; the SDHCI registers start at +0x900 */
  #define GCC_SDCC1_PHYS  0x01842000ul    /* SDCC1 BCR, then the apps RCG at +4 */
-@@ -512,6 +512,111 @@
+@@ -592,6 +592,116 @@
  	printf("VINCE MMC: no GPT partition named \"%s\"\n", want);
  	return ENOENT;
  }
  
 +/*
-+ * Persistent console log: sweet_ufs.c keeps every console byte in a 4 MiB
-+ * ring; this thread copies it, in order, to the last 4 MiB + one block of the
-+ * partition (far past the HFS image). Block 0 of the area is a header:
++ * Persistent console log. serial_console.c keeps every console byte in the
++ * 8 MiB vince_conlog ring; this thread copies it, in order, to the last
++ * 4 MiB + one block of the partition, far past the HFS image. Block 0 of the
++ * area is a header:
 + *   "SWEETLOG" | u32 version | u32 size | u64 total | u64 sequence
-+ * The data follows, starting at block 1. Read it from recovery with
++ * The data follows from block 1. Read it from recovery with
 + * tools/dig-log-pull.sh. Disabled with boot-arg sweetlog=0.
 + */
 +#define DIG_LOG_AREA    (4u << 20)
 +#define DIG_LOG_BLOCKS  (DIG_LOG_AREA / SECTOR)
 +#define DIG_LOG_SECS    2
++#define DIG_LOG_RING    (1u << 23)
 +
 +struct dig_log_header {
 +	char magic[8];
@@ -52,22 +55,25 @@ diff --git a/bsd/dev/vince_mmc.c b/bsd/dev/vince_mmc.c
 +	printf("VINCE LOG: console log at the last %u KiB of the partition (block 0x%llx)\n",
 +	    (DIG_LOG_BLOCKS + 1) * SECTOR >> 10, base);
 +	for (;;) {
++		uint64_t total;
++		uint32_t sectors, tail, done = 0;
++		int error = 0;
++
 +		(void)tsleep(&vince_log_chan, PZERO, "vincelog", hz * DIG_LOG_SECS);
-+		while (stage_len < sizeof(stage)) {
-+			uint32_t n = sweet_log_copy(&pos, stage + stage_len,
-+			    (uint32_t)sizeof(stage) - stage_len);
-+			if (n == 0) {
-+				break;
++		total = vince_conlog_pos;
++		while (stage_len < sizeof(stage) && pos < total) {
++			uint32_t n = (uint32_t)MIN(total - pos, (uint64_t)sizeof(stage) - stage_len);
++			for (uint32_t i = 0; i < n; i++) {
++				stage[stage_len + i] = vince_conlog[(pos + i) & (DIG_LOG_RING - 1)];
 +			}
++			pos += n;
 +			stage_len += n;
 +		}
 +		if (stage_len == 0) {
 +			continue;
 +		}
-+		uint32_t sectors = stage_len / SECTOR;
-+		uint32_t tail = stage_len - sectors * SECTOR;
-+		uint32_t done = 0;
-+		int error = 0;
++		sectors = stage_len / SECTOR;
++		tail = stage_len - sectors * SECTOR;
 +
 +		lck_mtx_lock(&vince_mmc_lock);
 +		while (done < sectors && !error) {
