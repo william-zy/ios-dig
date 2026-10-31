@@ -1,14 +1,16 @@
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index bb21ffc..f47f57e 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
 +++ b/iokit/Kernel/arm/hid/SweetHID.cpp
-@@ -441,10 +441,10 @@ SweetHIDTouch::start(IOService *provider)
+@@ -7,10 +7,10 @@ SweetHIDTouch::start(IOService *provider)
+ 	}
  	int native = 0;
  	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
 -	fLogicalW = native ? 1080 : 1125;
 -	fLogicalH = native ? SWEET_TOUCH_PANEL_H : 2436;
 -	fOffX = (fLogicalW - 1080) / 2;
 -	fOffY = (fLogicalH - SWEET_TOUCH_PANEL_H) / 2;
-+	fLogicalW = native ? 720 : 1125; /* DIG panel in native mode */
++	fLogicalW = native ? 720 : 1125;
 +	fLogicalH = native ? 1280 : 2436;
 +	fOffX = native ? 0 : (1125 - 1080) / 2;
 +	fOffY = native ? 0 : (2436 - SWEET_TOUCH_PANEL_H) / 2;
