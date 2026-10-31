@@ -1,7 +1,7 @@
 diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 --- a/iokit/Kernel/IOUserClient.cpp
 +++ b/iokit/Kernel/IOUserClient.cpp
-@@ -2778,8 +2778,14 @@ internal_io_service_get_matching_service(
+@@ -2778,6 +2778,11 @@ internal_io_service_get_matching_service(
  		char sname[32];
  		if (sweet_iolog(sname, sizeof(sname))) {
 -			sweet_iolog_dict(sname, "matching1", dict,
@@ -15,4 +15,3 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 +			}
  		}
  #endif
- 	} else {
