@@ -95,7 +95,7 @@ def build_dig_adt(seed=None, phys_base=None, mem_size=None):
         ('dram-size', u64(mem_size)),
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
-        ('display-scale', u32(3)),
+        ('display-scale', u32(2)),
         ('display-rotation', u32(0)),
         ('unique-chip-id', u64(DIG_ECID)),
         ('chip-id', u32(0x8015)),  # Apple A11 Bionic (iPhone X)
@@ -149,11 +149,12 @@ def build_dig_adt(seed=None, phys_base=None, mem_size=None):
         ph(),
         ('device_type', cstr('display-subsystem')),
         ('compatible', cstr('dig,display') + cstr('sweet,display') + b'\0'),
-        # IOMobileFramebuffer reads the canvas from this node: the iPhone X
-        # size AppleCLCD presents (1125x2436, 375x812 points @3x). The panel
-        # shows a scaled copy of it.
-        ('canvas-width', u32(1125)),
-        ('canvas-height', u32(2436)),
+        # IOMobileFramebuffer reads the canvas from this node. 750x1334 is
+        # iPhone 8 geometry (375x667 points @2x): a real point size, so UIKit
+        # provides a status bar, and its 16:9 aspect scales onto the 720x1280
+        # panel with no letterboxing.
+        ('canvas-width', u32(750)),
+        ('canvas-height', u32(1334)),
     ])
 
     # SDHCI eMMC storage node

@@ -1,0 +1,20 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -117,8 +117,15 @@ AppleCLCD::start(IOService *provider)
+ 	int native = 0;
++	uint32_t logical_w = 0, logical_h = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	if (PE_parse_boot_argn("sweetfb_w", &logical_w, sizeof(logical_w)) &&
++	    PE_parse_boot_argn("sweetfb_h", &logical_h, sizeof(logical_h)) &&
++	    logical_w != 0 && logical_h != 0) {
++		/* A real iPhone point size keeps UIKit's status bar provider. */
++		fLogicalW = logical_w;
++		fLogicalH = logical_h;
++	} else if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
