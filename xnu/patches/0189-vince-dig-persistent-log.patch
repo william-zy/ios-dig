@@ -1,18 +1,20 @@
 diff --git a/bsd/dev/vince_mmc.c b/bsd/dev/vince_mmc.c
 --- a/bsd/dev/vince_mmc.c
 +++ b/bsd/dev/vince_mmc.c
+@@ -39,5 +39,7 @@
+ /* bsd/dev/vince_input.c: keys and touch threads for SweetHID */
+ extern void vince_input_start(void);
++extern int hz;
++extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
+ 
+ #define SDCC1_PHYS      0x07824000ul    /* MCI core; the SDHCI registers start at +0x900 */
+ #define GCC_SDCC1_PHYS  0x01842000ul    /* SDCC1 BCR, then the apps RCG at +4 */
 @@ -57,3 +57,5 @@
  #include <kern/locks.h>
  #include <kern/clock.h>
 +#include <kern/thread.h>
 +#include <kern/sched_prim.h>
  #include <pexpert/pexpert.h>
-@@ -63,3 +63,5 @@
- extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
-+extern int hz;
-+extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
- 
- #define SDCC1_PHYS      0x07824000ul    /* MCI core; the SDHCI registers start at +0x900 */
 @@ -512,6 +512,111 @@
  	printf("VINCE MMC: no GPT partition named \"%s\"\n", want);
  	return ENOENT;
@@ -125,12 +127,12 @@ diff --git a/bsd/dev/vince_mmc.c b/bsd/dev/vince_mmc.c
 +
  /* What the partition holds, for the log: the superblock magics at offset 1024 (HFS+, ext4, F2FS). */
  static const char *
-@@ -828,7 +828,8 @@
- 	printf("VINCE MMC: \"%s\" at sector 0x%llx, %llu MiB, %s, %s (8-bit HS 50 MHz, PIO)\n",
+@@ -832,7 +832,8 @@
  	    want, vm.first, vm.nsect * SECTOR >> 20, fs, vm.rw ? "read-write" : "read-only");
+ 	sweet_sample_start();
 +	vince_log_start();
+ 	vince_input_start();
  	return 0;
  }
  
  /* Root device for rd=mmcroot0, and the mmcprobe=1 check (IOFindBSDRoot). */
- int vince_mmc_rootdev(dev_t *dev);
