@@ -16,16 +16,3 @@ diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.c
  	fMinX = 0;
  	fMaxX = 1079;
 
-diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
---- a/iokit/Kernel/arm/SweetFramebuffer.cpp
-+++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -117,8 +117,8 @@ AppleCLCD::start(IOService *provider)
- 	}
- 	int native = 0;
- 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
--	fLogicalW = fWidth;
--	fLogicalH = fHeight;
-+	fLogicalW = native ? fWidth : SWEET_FB_LOGICAL_W;
-+	fLogicalH = native ? fHeight : SWEET_FB_LOGICAL_H;
- 	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
- 		fLogicalW = SWEET_FB_LOGICAL_W;
