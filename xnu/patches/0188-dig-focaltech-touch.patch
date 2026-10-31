@@ -1,0 +1,133 @@
+diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
+--- a/bsd/dev/vince_input.c
++++ b/bsd/dev/vince_input.c
+@@ -118,3 +118,7 @@
+ #define RMI_ADDR        0x20
++#define FT_ADDR         0x38            /* DIG: FocalTech FT5336 on the same bus */
++#define FT_REG_TD_STATUS 0x02
++#define FT_REG_POINTS   0x03
++#define FT_MAX_POINTS   5
+ #define VINCE_TOUCH_FINGERS 4
+ #define TOUCH_POLL_MS   8
+@@ -122,2 +122,3 @@
+ static uint32_t qup_in_fifo, qup_out_fifo, qup_clk_ctl = CLK_CTL_400K;
++static uint32_t i2c_addr = RMI_ADDR;
+ static int rmi_page = -1;
+@@ -256,4 +256,4 @@
+ static int
+ qup_msg(int rd, const uint8_t *tx, uint8_t *rx, uint32_t n)
+ {
+-	uint32_t addr8 = (RMI_ADDR << 1) | (rd ? 1u : 0u);
++	uint32_t addr8 = (i2c_addr << 1) | (rd ? 1u : 0u);
+@@ -431,8 +431,95 @@
+ static void
+ touch_release_all(void)
+ {
+ 	for (int i = 0; i < VINCE_TOUCH_FINGERS; i++) {
+ 		sweet_hid_touch(i, 0, 0, 0);
+ 	}
+ }
+ 
++/* FocalTech FT5336 (DIG-AL00): 1-byte register addressing, points at 0x03. */
++static int
++ft_read(uint8_t reg, uint8_t *buf, uint32_t n)
++{
++	uint8_t a = reg;
++	int r = qup_msg(0, &a, NULL, 1);
++	if (r) {
++		return r;
++	}
++	return qup_msg(1, NULL, buf, n);
++}
++
++static void
++ft_touch_thread(void *arg, wait_result_t result)
++{
++	uint8_t id = 0, d[FT_MAX_POINTS * 6];
++	bool was[FT_MAX_POINTS] = { false };
++	unsigned errors = 0;
++	(void)arg;
++	(void)result;
++
++	if (!touch_hw_init()) {
++		goto out;
++	}
++	/* Hard reset: FT5x36 needs the line low for >= 10 ms and ~300 ms to boot. */
++	tlmm_cfg(GPIO_RST, 0, 3, 3, true, false);
++	in_sleep(&touch_chan, 20);
++	tlmm_cfg(GPIO_RST, 0, 3, 3, true, true);
++	in_sleep(&touch_chan, 350);
++
++	int r = ft_read(0xa3, &id, 1);
++	if (r && qup_clk_ctl != CLK_CTL_100K) {
++		qup_clk_ctl = CLK_CTL_100K;
++		r = ft_read(0xa3, &id, 1);
++	}
++	printf("VINCE INPUT: FocalTech at %#x chip id %#x (read %d), %d points max
+",
++	    FT_ADDR, id, r, FT_MAX_POINTS);
++	if (r) {
++		printf("VINCE INPUT: no FocalTech answer; touch off
+");
++		goto out;
++	}
++
++	for (;;) {
++		uint8_t st = 0;
++		r = ft_read(FT_REG_TD_STATUS, &st, 1);
++		int n = r ? 0 : (int)(st & 0x0fu);
++		if (n > FT_MAX_POINTS) {
++			n = FT_MAX_POINTS;
++		}
++		if (!r && n > 0) {
++			r = ft_read(FT_REG_POINTS, d, (uint32_t)n * 6);
++			if (!r) {
++				for (int i = 0; i < n; i++) {
++					const uint8_t *p = d + 6 * i;
++					int x = ((p[0] & 0x0fu) << 8) | p[1];
++					int y = ((p[2] & 0x0fu) << 8) | p[3];
++					sweet_hid_touch(i, 1, x, y);
++					was[i] = true;
++				}
++			}
++		}
++		if (!r) {
++			for (int i = n; i < FT_MAX_POINTS; i++) {
++				if (was[i]) {
++					sweet_hid_touch(i, 0, 0, 0);
++					was[i] = false;
++				}
++			}
++		}
++		if (r) {
++			if ((errors++ % 100u) == 0) {
++				printf("VINCE INPUT: FocalTech read error %d (i2c %#x qup %#x)
+", r,
++				    in_rd(qup, QUP_I2C_STATUS), in_rd(qup, QUP_ERROR_FLAGS));
++			}
++			if (errors == 5) {
++				touch_release_all();
++			}
++		} else {
++			errors = 0;
++		}
++		in_sleep(&touch_chan, TOUCH_POLL_MS);
++	}
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
+@@ -554,6 +554,11 @@
+ 	if (touch) {
+ 		gcc = ml_io_map(GCC_QUP3_PA, 0x1000);
+ 		qup = ml_io_map(QUP3_PA, 0x1000);
+-		if (gcc && qup && kernel_thread_start(touch_thread, NULL, &thread) == KERN_SUCCESS) {
++		int ft = 0;
++		(void)PE_parse_boot_argn("sweetft", &ft, sizeof(ft));
++		if (ft) {
++			i2c_addr = FT_ADDR;
++		}
++		if (gcc && qup && kernel_thread_start(ft ? ft_touch_thread : touch_thread, NULL, &thread) == KERN_SUCCESS) {
+ 			thread_deallocate(thread);
+ 		} else {
