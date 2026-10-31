@@ -1,26 +1,17 @@
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
 +++ b/iokit/Kernel/arm/hid/SweetHID.cpp
-@@ -438,12 +438,19 @@ SweetHIDTouch::start(IOService *provider)
- 	}
+@@ -441,10 +441,10 @@ SweetHIDTouch::start(IOService *provider)
  	int native = 0;
  	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
 -	fLogicalW = native ? 1080 : 1125;
 -	fLogicalH = native ? SWEET_TOUCH_PANEL_H : 2436;
 -	fOffX = (fLogicalW - 1080) / 2;
 -	fOffY = (fLogicalH - SWEET_TOUCH_PANEL_H) / 2;
-+	/* sweetfb_native=1 reports DIG-AL00's 720x1280 panel. Touch delivery is
-+	 * still controlled separately by sweettouch=0. */
-+	if (native) {
-+		fLogicalW = 720;
-+		fLogicalH = 1280;
-+		fOffX = 0;
-+		fOffY = 0;
-+	} else {
-+		fLogicalW = 1125;
-+		fLogicalH = 2436;
-+		fOffX = (fLogicalW - 1080) / 2;
-+		fOffY = (fLogicalH - SWEET_TOUCH_PANEL_H) / 2;
-+	}
++	fLogicalW = native ? 720 : 1125; /* DIG panel in native mode */
++	fLogicalH = native ? 1280 : 2436;
++	fOffX = native ? 0 : (1125 - 1080) / 2;
++	fOffY = native ? 0 : (2436 - SWEET_TOUCH_PANEL_H) / 2;
  	/* The digitizer covers the main display (backboardd maps it 1:1). */
  	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
