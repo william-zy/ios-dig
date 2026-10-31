@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 --- a/bsd/dev/vince_input.c
 +++ b/bsd/dev/vince_input.c
-@@ -118,3 +118,7 @@
+@@ -100,3 +100,7 @@
  #define RMI_ADDR        0x20
 +#define FT_ADDR         0x38            /* DIG: FocalTech FT5336 on the same bus */
 +#define FT_REG_TD_STATUS 0x02
@@ -9,17 +9,18 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 +#define FT_MAX_POINTS   5
  #define VINCE_TOUCH_FINGERS 4
  #define TOUCH_POLL_MS   8
-@@ -122,2 +122,3 @@
+@@ -109,2 +109,3 @@
  static uint32_t qup_in_fifo, qup_out_fifo, qup_clk_ctl = CLK_CTL_400K;
 +static uint32_t i2c_addr = RMI_ADDR;
  static int rmi_page = -1;
-@@ -256,4 +256,4 @@
+@@ -238,5 +238,5 @@
  static int
  qup_msg(int rd, const uint8_t *tx, uint8_t *rx, uint32_t n)
  {
 -	uint32_t addr8 = (RMI_ADDR << 1) | (rd ? 1u : 0u);
 +	uint32_t addr8 = (i2c_addr << 1) | (rd ? 1u : 0u);
-@@ -431,8 +431,95 @@
+ 	uint32_t ntx = rd ? 2 : n + 1;
+@@ -414,10 +414,97 @@
  static void
  touch_release_all(void)
  {
@@ -115,7 +116,9 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 +	thread_block(THREAD_CONTINUE_NULL);
 +}
 +
-@@ -554,6 +554,11 @@
+ static void
+ touch_thread(void *arg, wait_result_t result)
+@@ -521,6 +521,11 @@
  	if (touch) {
  		gcc = ml_io_map(GCC_QUP3_PA, 0x1000);
  		qup = ml_io_map(QUP3_PA, 0x1000);
