@@ -1,19 +1,17 @@
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
-index bb21ffc..f47f57e 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
 +++ b/iokit/Kernel/arm/hid/SweetHID.cpp
-@@ -7,10 +7,10 @@ SweetHIDTouch::start(IOService *provider)
+@@ -441,9 +441,9 @@ SweetHIDTouch::start(IOService *provider)
  	}
  	int native = 0;
  	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
 -	fLogicalW = native ? 1080 : 1125;
--	fLogicalH = native ? SWEET_TOUCH_PANEL_H : 2436;
--	fOffX = (fLogicalW - 1080) / 2;
--	fOffY = (fLogicalH - SWEET_TOUCH_PANEL_H) / 2;
 +	fLogicalW = native ? 720 : 1125;
+-	fLogicalH = native ? SWEET_TOUCH_PANEL_H : 2436;
 +	fLogicalH = native ? 1280 : 2436;
-+	fOffX = native ? 0 : (1125 - 1080) / 2;
-+	fOffY = native ? 0 : (2436 - SWEET_TOUCH_PANEL_H) / 2;
- 	/* The digitizer covers the main display (backboardd maps it 1:1). */
- 	setProperty("DisplayIntegrated", kOSBooleanTrue);
- 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+-	fOffX = (fLogicalW - 1080) / 2;
++	fOffX = native ? 0 : (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - SWEET_TOUCH_PANEL_H) / 2;
++	fOffY = native ? 0 : (fLogicalH - SWEET_TOUCH_PANEL_H) / 2;
+ 	fMinX = 0;
+ 	fMaxX = 1079;
