@@ -1,19 +1,12 @@
 diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
 --- a/iokit/Kernel/IOUserClient.cpp
 +++ b/iokit/Kernel/IOUserClient.cpp
-@@ -2778,6 +2778,13 @@ internal_io_service_get_matching_service(
+@@ -2778,6 +2778,6 @@ internal_io_service_get_matching_service(
  		char sname[32];
  		if (sweet_iolog(sname, sizeof(sname))) {
 -			sweet_iolog_dict(sname, "matching1", dict,
 -			    *service ? (*service)->getMetaClass()->getClassName() : "none");
-+			const char *result = *service ? (*service)->getMetaClass()->getClassName() : "none";
-+			static bool accel_none_logged;
-+			bool accel_none = matching != NULL && strncmp(matching, "<dict ID=\"0\"><key>IOProviderClass</key><string ID=\"1\">IOAccelerometer", 66) == 0 && *service == NULL;
-+			if (!accel_none || !accel_none_logged) {
-+				if (accel_none) {
-+					accel_none_logged = true;
-+				}
-+				sweet_iolog_dict(sname, "matching1", dict, result);
-+			}
++			/* DIG: backboardd repeats this for the absent accelerometer. */
++			(void)sname;
  		}
  #endif
