@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,179 @@
+@@ -430,5 +430,190 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -48,6 +48,15 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +static struct vsmd_ch rpm_ch;
 +static bool rpm_opened;
 +static uint32_t rpm_msg_id;
++
++static void
++rpm_dump_item(const char *what, uint32_t item)
++{
++	uint32_t tb = 0xD0u + item * 16;
++
++	printf("VINCE RPM: %s item %u: alloc %#x off %#x size %#x aux %#x\n", what, item,
++	    srd32(tb), srd32(tb + 4), srd32(tb + 8), srd32(tb + 12) & ~3u);
++}
 +
 +static void
 +rpm_show_table(int t)
@@ -114,6 +123,8 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +				printf("VINCE RPM: %s cid %u: bad items (%#lx/%u %#lx/%u)\n", nm, cid,
 +				    (unsigned long)io, isz, (unsigned long)fo, fsz);
 +				return false;
++				rpm_dump_item("info", vtbls[t].info + cid);
++				rpm_dump_item("fifo", vtbls[t].fifo + cid);
 +			}
 +			c->info = io;
 +			c->fifo = fo;

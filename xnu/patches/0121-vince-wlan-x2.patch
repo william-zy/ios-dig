@@ -50,14 +50,20 @@ index 2ade42c..4c34b7e 100644
  		return false;
  	}
  	for (int t = 0; t < 2; t++) {
-@@ -232,6 +239,41 @@ vince_smd_find(const char *name, struct vsmd_ch *c)
+@@ -232,6 +239,57 @@ vince_smd_find(const char *name, struct vsmd_ch *c)
  	return false;
  }
  
 +/*
 + * Mapped address of a global SMEM item: the global partition first (both hosts 0xfffe), then the legacy item table
-+ * in the SMEM header (shim smem.c smem_get). 0 if absent. The RPM message RAM aux region is not handled.
++ * in the SMEM header (smem_get in the vendor smem.c). A heap entry names its region in the reserved word; the RPM
++ * keeps its channel pages in aux-mem1 (0x60000, 32 KiB), so that region is mapped on demand. 0 if absent.
 + */
++#define SMEM_AUX_PA     0x00060000u
++#define SMEM_AUX_SIZE   0x00008000u
++
++static vm_offset_t smem_aux;
++
 +vm_offset_t
 +vince_smd_item(uint32_t item, uint32_t *size)
 +{
@@ -77,18 +83,28 @@ index 2ade42c..4c34b7e 100644
 +	if (item < 512) {
 +		uint32_t tb = 0xD0u + item * 16;
 +
-+		if (srd32(tb) == 1) {
++		if (srd32(tb)) {
 +			uint32_t off = srd32(tb + 4), isz = srd32(tb + 8), aux = srd32(tb + 12) & ~3u;
++			vm_offset_t base = smem;
++			uint32_t limit = SMEM_SIZE;
 +
-+			if ((aux == 0 || aux == SMEM_PA) && off <= SMEM_SIZE && isz <= SMEM_SIZE - off) {
++			if (aux == SMEM_AUX_PA) {
++				if (!smem_aux) {
++					smem_aux = ml_io_map(SMEM_AUX_PA, SMEM_AUX_SIZE);
++				}
++				base = smem_aux;
++				limit = SMEM_AUX_SIZE;
++			} else if (aux != 0 && aux != SMEM_PA) {
++				return 0;
++			}
++			if (base && off <= limit && isz <= limit - off) {
 +				*size = isz;
-+				return smem + off;
++				return base + off;
 +			}
 +		}
 +	}
 +	return 0;
 +}
-+
  /* ---- the channel ---- */
  
  static void
