@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,406 @@
+@@ -430,5 +430,378 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -33,10 +33,12 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 + * allocation table is item 13 (or 266), the info page item 14 + cid (138 + cid)
 + * and the FIFO item 338 + cid (202 + cid); the info page and FIFO live in the
 + * aux-mem1 region (0x60000). RPM channels are word-access channels
-+ * (smd_private.c is_word_access_ch): the info page is 88 bytes and every
-+ * control field is a u32, the FIFO bytes are unchanged.
++ * (smd_private.c is_word_access_ch): the info page is 88 bytes, every control
++ * field is a u32, and the FIFO is copied with 32-bit accesses only
++ * (smd_memcpy32_to_fifo) - a byte store to the FIFO raises an SError.
 + * Doorbell APCS IPC bit 0, as msm8937.dtsi qcom,smd-rpm says (edge 15,
-+ * irq-bitmask 1). Request layout, from drivers/soc/qcom/rpm-smd.c:
++ * irq-bitmask 1). Request layout, from drivers/soc/qcom/rpm-smd.c; each KVP
++ * value is padded to 4 bytes:
 + *   {u32 "req", u32 len} {u32 msg_id, u32 set, u32 rsc_type, u32 rsc_id,
 + *   u32 data_len} then KVPs {u32 key, u32 size, data}.
 + */
@@ -112,8 +114,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +static int
 +rpm_open(struct vsmd_ch *c)
 +{
-+	printf("VINCE RPM: open info %#lx\n", (unsigned long)c->info);
-+	/* the RPM half starts closed: announce OPENING and let it answer */
++	/* the RPM half starts closed or closing: announce OPENING and let it answer */
 +	rpm_set_state(c, ST_OPENING);
 +	if (!rpm_wait_remote(c, ST_OPENING, ST_OPENED, 2000)) {
 +		rpm_set_state(c, ST_CLOSED);
@@ -132,31 +133,41 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	return 0;
 +}
 +
++/* 32-bit FIFO copy: word-access channels reject byte accesses */
 +static int
 +rpm_send(struct vsmd_ch *c, const void *data, uint32_t len)
 +{
 +	const uint8_t *p = data;
 +	uint32_t head = rpm_rd(c, I_HEAD, W_HEAD), tail = rpm_rd(c, I_TAIL, W_TAIL);
++	uint8_t pkt[SMD_HDR + 64];
++	uint32_t total = SMD_HDR + len;
 +
-+	if (!c->open || !len || len > MAX_PKT || head >= c->half || tail >= c->half) {
++	if (!c->open || !len || len > MAX_PKT || total > sizeof(pkt) || head >= c->half || tail >= c->half) {
 +		return -1;
 +	}
-+	if ((c->half - 1) - ((head - tail) & (c->half - 1)) < SMD_HDR + len) {
++	if (total & 3) {
++		return -3;      /* word-access FIFO: the packet must be a multiple of 4 */
++	}
++	if ((c->half - 1) - ((head - tail) & (c->half - 1)) < total) {
 +		return -2;
 +	}
-+	uint8_t hdr[SMD_HDR] = { (uint8_t)len, (uint8_t)(len >> 8), (uint8_t)(len >> 16), (uint8_t)(len >> 24) };
++	memset(pkt, 0, sizeof(pkt));
++	pkt[0] = (uint8_t)len;
++	pkt[1] = (uint8_t)(len >> 8);
++	pkt[2] = (uint8_t)(len >> 16);
++	pkt[3] = (uint8_t)(len >> 24);
++	memcpy(pkt + SMD_HDR, p, len);
 +
 +	rpm_wr(c, I_FTAIL, W_FTAIL, 0);
-+	for (uint32_t i = 0; i < SMD_HDR; i++) {
-+		wr8(c->fifo + head, hdr[i]);
-+		head = (head + 1) & (c->half - 1);
-+	}
-+	for (uint32_t i = 0; i < len; i++) {
-+		wr8(c->fifo + head, p[i]);
-+		head = (head + 1) & (c->half - 1);
++	for (uint32_t i = 0; i < total; i += 4) {
++		uint32_t w = (uint32_t)pkt[i] | ((uint32_t)pkt[i + 1] << 8) |
++		    ((uint32_t)pkt[i + 2] << 16) | ((uint32_t)pkt[i + 3] << 24);
++
++		wr32(c->fifo + (head & (c->half - 1)), w);
++		head += 4;
 +	}
 +	__asm__ volatile("dsb osh" ::: "memory");
-+	rpm_wr(c, I_HEAD, W_HEAD, head);
++	rpm_wr(c, I_HEAD, W_HEAD, head & (c->half - 1));
 +	rpm_wr(c, I_FHEAD, W_FHEAD, 1);
 +	kick();
 +	return 0;
@@ -173,23 +184,23 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +		    rpm_rd(c, I_HALF + I_TAIL, W_HALF + W_TAIL)) & (c->half - 1);
 +
 +		if (avail >= SMD_HDR) {
-+			uint32_t tail = rpm_rd(c, I_HALF + I_TAIL, W_HALF + W_TAIL), len = 0;
++			uint32_t tail = rpm_rd(c, I_HALF + I_TAIL, W_HALF + W_TAIL);
++			uint32_t len = rd32(rx + tail);
 +
-+			for (uint32_t i = 0; i < 4; i++) {
-+				len |= (uint32_t)rd8(rx + ((tail + i) & (c->half - 1))) << (8 * i);
-+			}
-+			if (!len || len > MAX_PKT || SMD_HDR + len > c->half - 1) {
++			if (!len || len > MAX_PKT || ((SMD_HDR + len) & 3) || SMD_HDR + len > c->half - 1) {
 +				return -1;
 +			}
 +			if (avail >= SMD_HDR + len) {
 +				tail = (tail + SMD_HDR) & (c->half - 1);
-+				for (uint32_t i = 0; i < len; i++) {
-+					uint8_t b = rd8(rx + tail);
++				for (uint32_t i = 0; i < len; i += 4) {
++					uint32_t w = rd32(rx + tail);
 +
-+					tail = (tail + 1) & (c->half - 1);
-+					if (i < max) {
-+						out[i] = b;
++					for (int b = 0; b < 4 && i + b < len; b++) {
++						if (i + b < max) {
++							out[i + b] = (uint8_t)(w >> (8 * b));
++						}
 +					}
++					tail = (tail + 4) & (c->half - 1);
 +				}
 +				__asm__ volatile("dsb osh" ::: "memory");
 +				rpm_wr(c, I_HALF + I_TAIL, W_HALF + W_TAIL, tail);
@@ -314,26 +325,21 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +		printf("VINCE RPM: no rpm_requests channel\n");
 +		return false;
 +	}
-+	/* if both halves are already open (the bootloader used the channel), do not
-+	 * repeat the handshake: the SError shows up about a second after it */
 +	uint32_t ls = rpm_rd(&rpm_ch, I_STATE, W_STATE);
 +	uint32_t rs = rpm_rd(&rpm_ch, I_HALF + I_STATE, W_HALF + W_STATE);
++	int r = 0;
 +
 +	printf("VINCE RPM: state local %u remote %u\n", ls, rs);
-+	vince_smd_sleep(1000);
-+	if (ls == ST_OPENED && rs == ST_OPENED) {
-+		rpm_ch.open = true;
-+		printf("VINCE RPM: already open\n");
-+		vince_smd_sleep(1000);
-+	} else {
-+		int r = rpm_open(&rpm_ch);
-+
++	if (ls != ST_OPENED || rs != ST_OPENED) {
++		r = rpm_open(&rpm_ch);
 +		if (r) {
-+			printf("VINCE RPM: rpm_requests open failed %d (tx %u rx %u)\n", r,
++			printf("VINCE RPM: open failed %d (tx %u rx %u)\n", r,
 +			    rpm_rd(&rpm_ch, I_STATE, W_STATE),
 +			    rpm_rd(&rpm_ch, I_HALF + I_STATE, W_HALF + W_STATE));
 +			return false;
 +		}
++	} else {
++		rpm_ch.open = true;
 +	}
 +	rpm_opened = true;
 +	return true;
@@ -355,70 +361,36 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	uint8_t buf[64];
 +	bool ok = true;
 +
-+	/* first: the heap entries only (main SMEM, always readable), then a pause so the
-+	 * persistent log has them on disk before anything touches the aux region */
-+	if (!vince_smd_map()) {
-+		printf("VINCE RPM: SMEM mapping failed\n");
-+		return false;
-+	}
-+	rpm_dump_item("alloc", vtbls[0].alloc);
-+	rpm_dump_item("info", vtbls[0].info + 4);
-+	rpm_dump_item("fifo", vtbls[0].fifo + 4);
-+	rpm_dump_item("alloc2", vtbls[1].alloc);
-+	rpm_dump_item("info2", vtbls[1].info + 4);
-+	rpm_dump_item("fifo2", vtbls[1].fifo + 4);
-+	vince_smd_sleep(2000);
-+	smd_irq_bit = RPM_IPC_BIT;
-+	printf("VINCE RPM: apcs test\n");
-+	vince_smd_sleep(2000);
-+	kick();
-+	vince_smd_sleep(2000);
-+	printf("VINCE RPM: apcs ok\n");
-+	vince_smd_sleep(1000);
-+	printf("VINCE RPM: init start\n");
-+	vince_smd_sleep(2000);
 +	if (!rpm_init()) {
 +		printf("VINCE RPM: ldo%u stays off\n", id);
 +		return false;
 +	}
-+	printf("VINCE RPM: init ok\n");
-+	vince_smd_sleep(10000);
-+	printf("VINCE RPM: post-init ok, fifo %#lx head %u tail %u\n", (unsigned long)rpm_ch.fifo,
-+	    rpm_rd(&rpm_ch, I_HEAD, W_HEAD), rpm_rd(&rpm_ch, I_TAIL, W_TAIL));
-+	vince_smd_sleep(1000);
-+	wr8(rpm_ch.fifo, 0);
-+	printf("VINCE RPM: fifo write ok\n");
-+	vince_smd_sleep(5000);
 +	for (uint32_t set = 0; set < 2; set++) {
 +		uint32_t msg_id = ++rpm_msg_id;
 +		int r, n;
 +
 +		memset(buf, 0, sizeof(buf));
 +		rpm_put32(buf + 0, RPM_REQ_SERVICE);
-+		rpm_put32(buf + 4, 41);         /* message header (20) + kvps (21) */
++		rpm_put32(buf + 4, 44);         /* request_len: 52 - 8 */
 +		rpm_put32(buf + 8, msg_id);
 +		rpm_put32(buf + 12, set);
 +		rpm_put32(buf + 16, RPM_RSC_LDOA);
 +		rpm_put32(buf + 20, id);
-+		rpm_put32(buf + 24, 21);
++		rpm_put32(buf + 24, 24);        /* data_len: the two kvps, 12 bytes each */
 +		rpm_put32(buf + 28, RPM_KEY_SWEN);
-+		rpm_put32(buf + 32, 1);
++		rpm_put32(buf + 32, 4);         /* swen is one byte, padded to four */
 +		buf[36] = 1;
-+		rpm_put32(buf + 37, RPM_KEY_UV);
-+		rpm_put32(buf + 41, 4);
-+		rpm_put32(buf + 45, uv);
-+		printf("VINCE RPM: send set %u\n", set);
-+		vince_smd_sleep(1000);
-+		r = rpm_send(&rpm_ch, buf, 49);
-+		printf("VINCE RPM: send set %u -> %d\n", set, r);
-+		vince_smd_sleep(1000);
++		rpm_put32(buf + 40, RPM_KEY_UV);
++		rpm_put32(buf + 44, 4);
++		rpm_put32(buf + 48, uv);
++		r = rpm_send(&rpm_ch, buf, 52);
 +		if (r) {
++			printf("VINCE RPM: ldo%u set %u send %d\n", id, set, r);
 +			ok = false;
 +			break;
 +		}
-+		n = rpm_recv(&rpm_ch, buf, sizeof(buf), 100);
-+		printf("VINCE RPM: recv set %u -> %d\n", set, n);
-+		vince_smd_sleep(500);
++		n = rpm_recv(&rpm_ch, buf, sizeof(buf), 200);
++		printf("VINCE RPM: ldo%u set %u sent, answer %d\n", id, set, n);
 +	}
 +	printf("VINCE RPM: ldo%u %u uV %s\n", id, uv, ok ? "requested" : "send failed");
 +	return ok;
