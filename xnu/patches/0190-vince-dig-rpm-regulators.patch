@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,354 @@
+@@ -430,5 +430,367 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -112,6 +112,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +static int
 +rpm_open(struct vsmd_ch *c)
 +{
++	printf("VINCE RPM: open info %#lx\n", (unsigned long)c->info);
 +	/* the RPM half starts closed: announce OPENING and let it answer */
 +	rpm_set_state(c, ST_OPENING);
 +	if (!rpm_wait_remote(c, ST_OPENING, ST_OPENED, 2000)) {
@@ -341,10 +342,22 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	uint8_t buf[64];
 +	bool ok = true;
 +
++	/* first: the heap entries only (main SMEM, always readable), then a pause so the
++	 * persistent log has them on disk before anything touches the aux region */
++	rpm_dump_item("alloc", vtbls[0].alloc);
++	rpm_dump_item("info", vtbls[0].info + 4);
++	rpm_dump_item("fifo", vtbls[0].fifo + 4);
++	rpm_dump_item("alloc2", vtbls[1].alloc);
++	rpm_dump_item("info2", vtbls[1].info + 4);
++	rpm_dump_item("fifo2", vtbls[1].fifo + 4);
++	vince_smd_sleep(2000);
++	printf("VINCE RPM: init start\n");
 +	if (!rpm_init()) {
 +		printf("VINCE RPM: ldo%u stays off\n", id);
 +		return false;
 +	}
++	printf("VINCE RPM: init ok\n");
++	vince_smd_sleep(1000);
 +	for (uint32_t set = 0; set < 2; set++) {
 +		uint32_t msg_id = ++rpm_msg_id;
 +
