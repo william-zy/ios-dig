@@ -20,7 +20,7 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 -	uint32_t addr8 = (RMI_ADDR << 1) | (rd ? 1u : 0u);
 +	uint32_t addr8 = (i2c_addr << 1) | (rd ? 1u : 0u);
  	uint32_t ntx = rd ? 2 : n + 1;
-@@ -414,10 +414,127 @@
+@@ -414,10 +414,140 @@
  static void
  touch_release_all(void)
  {
@@ -59,6 +59,14 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 +	tlmm_cfg(GPIO_RST, 0, 3, 3, true, true);
 +	in_sleep(&touch_chan, 350);
 +
++	/* TLMM readback: if the mux bits do not stick, the pins are not I2C. */
++	printf("VINCE INPUT: gpio ctl10=%#x ctl11=%#x ctl64=%#x io64=%#x io65=%#x\n",
++	    in_rd(tlmm, GPIO_CTL(GPIO_SDA)), in_rd(tlmm, GPIO_CTL(GPIO_SCL)),
++	    in_rd(tlmm, GPIO_CTL(GPIO_RST)), in_rd(tlmm, GPIO_IO(GPIO_RST)),
++	    in_rd(tlmm, GPIO_IO(GPIO_ATTN)));
++	/* Idle I2C lines must read high; low means the bus pull-ups have no rail. */
++	printf("VINCE INPUT: bus level sda=%u scl=%u\n",
++	    in_rd(tlmm, GPIO_IO(GPIO_SDA)) & 1u, in_rd(tlmm, GPIO_IO(GPIO_SCL)) & 1u);
 +	/* DIG's reset-gpio flag says active high, vince's active low: probe both
 +	 * levels and both common FocalTech addresses before giving up. */
 +	int r = -1;
@@ -74,6 +82,11 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 +			    level, addrs[a], id, r);
 +			if (!r) {
 +				break;
++			}
++			if (level == 0 && a == 0) {
++				printf("VINCE INPUT: first nack i2c %#x qup %#x op %#x\n",
++				    in_rd(qup, QUP_I2C_STATUS), in_rd(qup, QUP_ERROR_FLAGS),
++				    in_rd(qup, QUP_OPERATIONAL));
 +			}
 +		}
 +	}
