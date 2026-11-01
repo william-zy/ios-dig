@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,367 @@
+@@ -430,5 +430,376 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -344,6 +344,10 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +
 +	/* first: the heap entries only (main SMEM, always readable), then a pause so the
 +	 * persistent log has them on disk before anything touches the aux region */
++	if (!vince_smd_map()) {
++		printf("VINCE RPM: SMEM mapping failed\n");
++		return false;
++	}
 +	rpm_dump_item("alloc", vtbls[0].alloc);
 +	rpm_dump_item("info", vtbls[0].info + 4);
 +	rpm_dump_item("fifo", vtbls[0].fifo + 4);
@@ -351,13 +355,18 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	rpm_dump_item("info2", vtbls[1].info + 4);
 +	rpm_dump_item("fifo2", vtbls[1].fifo + 4);
 +	vince_smd_sleep(2000);
++	smd_irq_bit = RPM_IPC_BIT;
++	printf("VINCE RPM: apcs test\n");
++	kick();
++	vince_smd_sleep(2000);
++	printf("VINCE RPM: apcs ok\n");
 +	printf("VINCE RPM: init start\n");
 +	if (!rpm_init()) {
 +		printf("VINCE RPM: ldo%u stays off\n", id);
 +		return false;
 +	}
 +	printf("VINCE RPM: init ok\n");
-+	vince_smd_sleep(1000);
++	vince_smd_sleep(2000);
 +	for (uint32_t set = 0; set < 2; set++) {
 +		uint32_t msg_id = ++rpm_msg_id;
 +
