@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,143 @@
+@@ -430,5 +430,167 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -50,8 +50,10 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	uint32_t po, ps, cl;
 +
 +	if (!smem_partition(RPM_HOST_ID, &po, &ps, &cl, true)) {
++		printf("VINCE RPM: no global SMEM partition\n");
 +		return false;
 +	}
++	printf("VINCE RPM: global partition %#x+%#x cl %u\n", po, ps, cl);
 +	for (int t = 0; t < 2; t++) {
 +		uint32_t tsz = 0, tbl = part_get(po, ps, cl, vtbls[t].alloc, &tsz);
 +		if (!tbl) {
@@ -82,6 +84,28 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +			c->fifo = rpm_smem + fo;
 +			c->half = fsz / 2;
 +			return true;
++		}
++	}
++	/* nothing matched: show the first entries so the naming or edge id is visible. */
++	for (int t = 0; t < 2; t++) {
++		uint32_t tsz = 0, tbl = part_get(po, ps, cl, vtbls[t].alloc, &tsz);
++		if (!tbl) {
++			printf("VINCE RPM: no alloc table for slot %d\n", t);
++			continue;
++		}
++		for (uint32_t i = 0; i < 8 && (i + 1) * 32 <= tsz; i++) {
++			uint32_t e = tbl + i * 32;
++			char nm[21];
++			for (int j = 0; j < 20; j += 4) {
++				uint32_t w = srd32(e + j);
++				for (int b = 0; b < 4; b++) {
++					char ch = (char)(w >> (8 * b));
++					nm[j + b] = (ch >= 0x20 && ch < 0x7f) ? ch : 0;
++				}
++			}
++			nm[20] = 0;
++			printf("VINCE RPM: t%d[%u] %s cid %u type %#x ref %u\n", t, i, nm,
++			    srd32(e + 20), srd32(e + 24), srd32(e + 28));
 +		}
 +	}
 +	return false;
