@@ -49,7 +49,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +{
 +	uint32_t po, ps, cl;
 +
-+	if (!smem_partition(RPM_HOST_ID, &po, &ps, &cl)) {
++	if (!smem_partition(RPM_HOST_ID, &po, &ps, &cl, false)) {
 +		return false;
 +	}
 +	for (int t = 0; t < 2; t++) {
@@ -130,7 +130,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	bool ok = true;
 +
 +	if (!rpm_init()) {
-+		printf("VINCE RPM: no rpm_requests channel; ldo%u stays off"\n", id);
++		printf("VINCE RPM: no rpm_requests channel; ldo%u stays off\n", id);
 +		return false;
 +	}
 +	for (uint32_t set = 0; set < 2; set++) {
@@ -156,7 +156,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +		}
 +		(void)vince_smd_recv(&rpm_ch, buf, sizeof(buf), 200);
 +	}
-+	printf("VINCE RPM: ldo%u %u uV %s"\n", id, uv, ok ? "requested" : "send failed");
++	printf("VINCE RPM: ldo%u %u uV %s\n", id, uv, ok ? "requested" : "send failed");
 +	return ok;
 +}
 +
