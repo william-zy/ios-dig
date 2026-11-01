@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,376 @@
+@@ -430,5 +430,379 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -357,10 +357,13 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	vince_smd_sleep(2000);
 +	smd_irq_bit = RPM_IPC_BIT;
 +	printf("VINCE RPM: apcs test\n");
++	vince_smd_sleep(2000);
 +	kick();
 +	vince_smd_sleep(2000);
 +	printf("VINCE RPM: apcs ok\n");
++	vince_smd_sleep(1000);
 +	printf("VINCE RPM: init start\n");
++	vince_smd_sleep(2000);
 +	if (!rpm_init()) {
 +		printf("VINCE RPM: ldo%u stays off\n", id);
 +		return false;
