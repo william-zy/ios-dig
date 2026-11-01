@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,387 @@
+@@ -430,5 +430,400 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -314,13 +314,26 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +		printf("VINCE RPM: no rpm_requests channel\n");
 +		return false;
 +	}
-+	int r = rpm_open(&rpm_ch);
++	/* if both halves are already open (the bootloader used the channel), do not
++	 * repeat the handshake: the SError shows up about a second after it */
++	uint32_t ls = rpm_rd(&rpm_ch, I_STATE, W_STATE);
++	uint32_t rs = rpm_rd(&rpm_ch, I_HALF + I_STATE, W_HALF + W_STATE);
 +
-+	if (r) {
-+		printf("VINCE RPM: rpm_requests open failed %d (tx %u rx %u)\n", r,
-+		    rpm_rd(&rpm_ch, I_STATE, W_STATE),
-+		    rpm_rd(&rpm_ch, I_HALF + I_STATE, W_HALF + W_STATE));
-+		return false;
++	printf("VINCE RPM: state local %u remote %u\n", ls, rs);
++	vince_smd_sleep(1000);
++	if (ls == ST_OPENED && rs == ST_OPENED) {
++		rpm_ch.open = true;
++		printf("VINCE RPM: already open\n");
++		vince_smd_sleep(1000);
++	} else {
++		int r = rpm_open(&rpm_ch);
++
++		if (r) {
++			printf("VINCE RPM: rpm_requests open failed %d (tx %u rx %u)\n", r,
++			    rpm_rd(&rpm_ch, I_STATE, W_STATE),
++			    rpm_rd(&rpm_ch, I_HALF + I_STATE, W_HALF + W_STATE));
++			return false;
++		}
 +	}
 +	rpm_opened = true;
 +	return true;
