@@ -1,0 +1,158 @@
+diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
+--- a/bsd/dev/vince_smd.c
++++ b/bsd/dev/vince_smd.c
+@@ -100,5 +100,6 @@
+ static vm_offset_t smem, apcs;
+ static bool smd_started;
+ static int smd_chan;
++static uint32_t smd_irq_bit = APCS_IPC_WCNSS;
+ 
+ struct vsmd_ch {
+@@ -158,6 +158,6 @@
+ static void
+ kick(void)
+ {
+ 	__asm__ volatile("dsb osh" ::: "memory");
+-	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
++	wr32(apcs + APCS_IPC, smd_irq_bit);
+ }
+@@ -430,1 +430,139 @@
++/*
++ * RPM regulator requests (DIG-AL00). PM8937 LDOA5 (vcc_i2c 1.8 V) and LDOA10
++ * (touch VDD 2.8 V) belong to the RPM; LK leaves them off, so the FT5346 has
++ * no power and never answers on I2C. Same SMD transport as above, on the RPM
++ * edge (15, host 6), doorbell APCS IPC bit 0. Request layout
++ * (drivers/soc/qcom/rpm-smd.c):
++ *   {u32 "req", u32 len} {u32 msg_id, u32 set, u32 rsc_type, u32 rsc_id,
++ *   u32 data_len} then KVPs {u32 key, u32 size, data}.
++ */
++#define RPM_HOST_ID     6u
++#define RPM_EDGE_ID     15u
++#define RPM_IPC_BIT     (1u << 0)
++#define RPM_REQ_SERVICE 0x00716572u     /* "req" */
++#define RPM_RSC_LDOA    0x616f646cu     /* "ldoa" */
++#define RPM_KEY_SWEN    0x6e657773u     /* "swen" */
++#define RPM_KEY_UV      0x00007675u     /* "uv" */
++
++static vm_offset_t rpm_smem, rpm_apcs;
++static struct vsmd_ch rpm_ch;
++static bool rpm_opened;
++static uint32_t rpm_msg_id;
++
++static bool
++rpm_find(struct vsmd_ch *c)
++{
++	uint32_t po, ps, cl;
++
++	if (!smem_partition(RPM_HOST_ID, &po, &ps, &cl)) {
++		return false;
++	}
++	for (int t = 0; t < 2; t++) {
++		uint32_t tsz = 0, tbl = part_get(po, ps, cl, vtbls[t].alloc, &tsz);
++		if (!tbl) {
++			continue;
++		}
++		for (uint32_t i = 0; i < 64 && (i + 1) * 32 <= tsz; i++) {
++			uint32_t e = tbl + i * 32;
++			char nm[21];
++			for (int j = 0; j < 20; j += 4) {
++				uint32_t w = srd32(e + j);
++				for (int b = 0; b < 4; b++) {
++					char ch = (char)(w >> (8 * b));
++					nm[j + b] = (ch >= 0x20 && ch < 0x7f) ? ch : 0;
++				}
++			}
++			nm[20] = 0;
++			uint32_t cid = srd32(e + 20), flags = srd32(e + 24), ref = srd32(e + 28);
++			if (!nm[0] || !ref || (flags & 0xff) != RPM_EDGE_ID || strncmp(nm, "rpm_requests", 20) != 0) {
++				continue;
++			}
++			uint32_t isz = 0, fsz = 0;
++			uint32_t io = part_get(po, ps, cl, vtbls[t].info + cid, &isz);
++			uint32_t fo = part_get(po, ps, cl, vtbls[t].fifo + cid, &fsz);
++			if (!io || !fo || isz != 40 || fsz < 0x100 || (fsz & (fsz - 1)) || fo + fsz > SMEM_SIZE) {
++				return false;
++			}
++			c->info = rpm_smem + io;
++			c->fifo = rpm_smem + fo;
++			c->half = fsz / 2;
++			return true;
++		}
++	}
++	return false;
++}
++
++static bool
++rpm_init(void)
++{
++	if (rpm_opened) {
++		return true;
++	}
++	if (!rpm_smem) {
++		rpm_smem = ml_io_map(SMEM_PA, SMEM_SIZE);
++		rpm_apcs = ml_io_map(APCS_PA, 0x1000);
++	}
++	if (!rpm_smem || !rpm_apcs) {
++		return false;
++	}
++	smem = rpm_smem;
++	apcs = rpm_apcs;
++	smd_irq_bit = RPM_IPC_BIT;
++	if (!rpm_find(&rpm_ch)) {
++		return false;
++	}
++	if (vs_open(&rpm_ch)) {
++		return false;
++	}
++	rpm_opened = true;
++	return true;
++}
++
++static void
++rpm_put32(uint8_t *p, uint32_t v)
++{
++	p[0] = (uint8_t)v;
++	p[1] = (uint8_t)(v >> 8);
++	p[2] = (uint8_t)(v >> 16);
++	p[3] = (uint8_t)(v >> 24);
++}
++
++/* Enable an LDOA regulator at uv in both the active and the sleep set. */
++bool
++vince_rpm_ldo(unsigned id, uint32_t uv)
++{
++	uint8_t buf[64];
++	bool ok = true;
++
++	if (!rpm_init()) {
++		printf("VINCE RPM: no rpm_requests channel; ldo%u stays off"+NL+""", id);
++		return false;
++	}
++	for (uint32_t set = 0; set < 2; set++) {
++		uint32_t msg_id = ++rpm_msg_id;
++
++		memset(buf, 0, sizeof(buf));
++		rpm_put32(buf + 0, RPM_REQ_SERVICE);
++		rpm_put32(buf + 4, 41);         /* message header (20) + kvps (21) */
++		rpm_put32(buf + 8, msg_id);
++		rpm_put32(buf + 12, set);
++		rpm_put32(buf + 16, RPM_RSC_LDOA);
++		rpm_put32(buf + 20, id);
++		rpm_put32(buf + 24, 21);
++		rpm_put32(buf + 28, RPM_KEY_SWEN);
++		rpm_put32(buf + 32, 1);
++		buf[36] = 1;
++		rpm_put32(buf + 37, RPM_KEY_UV);
++		rpm_put32(buf + 41, 4);
++		rpm_put32(buf + 45, uv);
++		if (vs_send(&rpm_ch, buf, 49)) {
++			ok = false;
++			break;
++		}
++		(void)vs_recv(&rpm_ch, buf, sizeof(buf), 200);
++	}
++	printf("VINCE RPM: ldo%u %u uV %s"+NL+""", id, uv, ok ? "requested" : "send failed");
++	return ok;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_VINCE */
