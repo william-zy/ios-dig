@@ -20,7 +20,7 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 -	uint32_t addr8 = (RMI_ADDR << 1) | (rd ? 1u : 0u);
 +	uint32_t addr8 = (i2c_addr << 1) | (rd ? 1u : 0u);
  	uint32_t ntx = rd ? 2 : n + 1;
-@@ -414,10 +414,97 @@
+@@ -414,10 +414,115 @@
  static void
  touch_release_all(void)
  {
@@ -59,13 +59,31 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 +	tlmm_cfg(GPIO_RST, 0, 3, 3, true, true);
 +	in_sleep(&touch_chan, 350);
 +
-+	int r = ft_read(0xa3, &id, 1);
++	/* DIG's reset-gpio flag says active high, vince's active low: probe both
++	 * levels and both common FocalTech addresses before giving up. */
++	int r = -1;
++	static const uint32_t addrs[2] = { FT_ADDR, 0x70 };
++	for (int level = 0; level < 2 && r; level++) {
++		tlmm_cfg(GPIO_RST, 0, 3, 3, true, level == 0);
++		in_sleep(&touch_chan, 60);
++		for (int a = 0; a < 2; a++) {
++			i2c_addr = addrs[a];
++			id = 0;
++			r = ft_read(0xa3, &id, 1);
++			printf("VINCE INPUT: FocalTech probe rst=%d addr=%#x id=%#x read=%d\n",
++			    level, addrs[a], id, r);
++			if (!r) {
++				break;
++			}
++		}
++	}
 +	if (r && qup_clk_ctl != CLK_CTL_100K) {
 +		qup_clk_ctl = CLK_CTL_100K;
 +		r = ft_read(0xa3, &id, 1);
++		printf("VINCE INPUT: FocalTech retry at 100 kHz read=%d\n", r);
 +	}
 +	printf("VINCE INPUT: FocalTech at %#x chip id %#x (read %d), %d points max\n",
-+	    FT_ADDR, id, r, FT_MAX_POINTS);
++	    i2c_addr, id, r, FT_MAX_POINTS);
 +	if (r) {
 +		printf("VINCE INPUT: no FocalTech answer; touch off\n");
 +		goto out;
