@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,190 @@
+@@ -430,5 +430,356 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -30,11 +30,13 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 + * The RPM has no secured SMEM partition: the TOC in the last 4 KiB of SMEM lists
 + * only apps<->modem/Q6/WCNSS, so smem_get_entry() falls back to the legacy item
 + * table at 0xD0 for host 6 (vince_smd_item). Channel layout as in smd.c: the
-+ * allocation table is item 13 (or 266 for the second stream), the 40-byte info
-+ * page item 14 + cid (138 + cid) and the FIFO item 338 + cid (202 + cid).
-+ * Same packet transport as Pronto; doorbell APCS IPC bit 0, as msm8937.dtsi
-+ * qcom,smd-rpm says (edge 15, irq-bitmask 1). Request layout, from
-+ * drivers/soc/qcom/rpm-smd.c:
++ * allocation table is item 13 (or 266), the info page item 14 + cid (138 + cid)
++ * and the FIFO item 338 + cid (202 + cid); the info page and FIFO live in the
++ * aux-mem1 region (0x60000). RPM channels are word-access channels
++ * (smd_private.c is_word_access_ch): the info page is 88 bytes and every
++ * control field is a u32, the FIFO bytes are unchanged.
++ * Doorbell APCS IPC bit 0, as msm8937.dtsi qcom,smd-rpm says (edge 15,
++ * irq-bitmask 1). Request layout, from drivers/soc/qcom/rpm-smd.c:
 + *   {u32 "req", u32 len} {u32 msg_id, u32 set, u32 rsc_type, u32 rsc_id,
 + *   u32 data_len} then KVPs {u32 key, u32 size, data}.
 + */
@@ -45,9 +47,167 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +#define RPM_KEY_SWEN    0x6e657773u     /* "swen" */
 +#define RPM_KEY_UV      0x00007675u     /* "uv" */
 +
++/* word-access half channel (struct smd_half_channel_word_access) */
++#define W_STATE         0x00u
++#define W_FDSR          0x04u
++#define W_FCTS          0x08u
++#define W_FCD           0x0Cu
++#define W_FHEAD         0x14u
++#define W_FTAIL         0x18u
++#define W_FSTATE        0x1Cu
++#define W_FBLOCK        0x20u
++#define W_TAIL          0x24u
++#define W_HEAD          0x28u
++#define W_HALF          44u
++
 +static struct vsmd_ch rpm_ch;
 +static bool rpm_opened;
++static bool rpm_word;
 +static uint32_t rpm_msg_id;
++
++/* control field of our half: byte-access offsets or word-access offsets */
++static uint32_t
++rpm_rd(struct vsmd_ch *c, uint32_t boff, uint32_t woff)
++{
++	return rpm_word ? rd32(c->info + woff) : rd8(c->info + boff);
++}
++
++static void
++rpm_wr(struct vsmd_ch *c, uint32_t boff, uint32_t woff, uint32_t v)
++{
++	if (rpm_word) {
++		wr32(c->info + woff, v);
++	} else {
++		wr8(c->info + boff, (uint8_t)v);
++	}
++}
++
++static void
++rpm_set_state(struct vsmd_ch *c, uint32_t st)
++{
++	uint32_t open = st == ST_OPENED;
++
++	rpm_wr(c, I_FDSR, W_FDSR, open);
++	rpm_wr(c, I_FCTS, W_FCTS, open);
++	rpm_wr(c, I_FCD, W_FCD, open);
++	rpm_wr(c, I_STATE, W_STATE, st);
++	rpm_wr(c, I_FSTATE, W_FSTATE, 1);
++	kick();
++}
++
++static bool
++rpm_wait_remote(struct vsmd_ch *c, uint32_t a, uint32_t b, unsigned ms)
++{
++	for (unsigned t = 0; t <= ms; t += 5) {
++		uint32_t r = rpm_rd(c, I_HALF + I_STATE, W_HALF + W_STATE);
++
++		if (r == a || r == b) {
++			return true;
++		}
++		vince_smd_sleep(5);
++	}
++	return false;
++}
++
++static int
++rpm_open(struct vsmd_ch *c)
++{
++	if (rpm_rd(c, I_HALF + I_STATE, W_HALF + W_STATE) == ST_CLOSED) {
++		return -1;
++	}
++	rpm_set_state(c, ST_OPENING);
++	if (!rpm_wait_remote(c, ST_OPENING, ST_OPENED, 1000)) {
++		rpm_set_state(c, ST_CLOSED);
++		return -2;
++	}
++	rpm_set_state(c, ST_OPENED);
++	if (!rpm_wait_remote(c, ST_OPENED, ST_OPENED, 1000)) {
++		rpm_set_state(c, ST_CLOSED);
++		return -3;
++	}
++	rpm_wr(c, I_HALF + I_FSTATE, W_HALF + W_FSTATE, 0);
++	rpm_wr(c, I_HEAD, W_HEAD, rpm_rd(c, I_TAIL, W_TAIL));
++	rpm_wr(c, I_HALF + I_TAIL, W_HALF + W_TAIL, rpm_rd(c, I_HALF + I_HEAD, W_HALF + W_HEAD));
++	__asm__ volatile("dsb osh" ::: "memory");
++	c->open = true;
++	return 0;
++}
++
++static int
++rpm_send(struct vsmd_ch *c, const void *data, uint32_t len)
++{
++	const uint8_t *p = data;
++	uint32_t head = rpm_rd(c, I_HEAD, W_HEAD), tail = rpm_rd(c, I_TAIL, W_TAIL);
++
++	if (!c->open || !len || len > MAX_PKT || head >= c->half || tail >= c->half) {
++		return -1;
++	}
++	if ((c->half - 1) - ((head - tail) & (c->half - 1)) < SMD_HDR + len) {
++		return -2;
++	}
++	uint8_t hdr[SMD_HDR] = { (uint8_t)len, (uint8_t)(len >> 8), (uint8_t)(len >> 16), (uint8_t)(len >> 24) };
++
++	rpm_wr(c, I_FTAIL, W_FTAIL, 0);
++	for (uint32_t i = 0; i < SMD_HDR; i++) {
++		wr8(c->fifo + head, hdr[i]);
++		head = (head + 1) & (c->half - 1);
++	}
++	for (uint32_t i = 0; i < len; i++) {
++		wr8(c->fifo + head, p[i]);
++		head = (head + 1) & (c->half - 1);
++	}
++	__asm__ volatile("dsb osh" ::: "memory");
++	rpm_wr(c, I_HEAD, W_HEAD, head);
++	rpm_wr(c, I_FHEAD, W_FHEAD, 1);
++	kick();
++	return 0;
++}
++
++static int
++rpm_recv(struct vsmd_ch *c, void *buf, uint32_t max, unsigned ms)
++{
++	uint8_t *out = buf;
++	vm_offset_t rx = c->fifo + c->half;
++
++	for (unsigned t = 0;; t += 5) {
++		uint32_t avail = (rpm_rd(c, I_HALF + I_HEAD, W_HALF + W_HEAD) -
++		    rpm_rd(c, I_HALF + I_TAIL, W_HALF + W_TAIL)) & (c->half - 1);
++
++		if (avail >= SMD_HDR) {
++			uint32_t tail = rpm_rd(c, I_HALF + I_TAIL, W_HALF + W_TAIL), len = 0;
++
++			for (uint32_t i = 0; i < 4; i++) {
++				len |= (uint32_t)rd8(rx + ((tail + i) & (c->half - 1))) << (8 * i);
++			}
++			if (!len || len > MAX_PKT || SMD_HDR + len > c->half - 1) {
++				return -1;
++			}
++			if (avail >= SMD_HDR + len) {
++				tail = (tail + SMD_HDR) & (c->half - 1);
++				for (uint32_t i = 0; i < len; i++) {
++					uint8_t b = rd8(rx + tail);
++
++					tail = (tail + 1) & (c->half - 1);
++					if (i < max) {
++						out[i] = b;
++					}
++				}
++				__asm__ volatile("dsb osh" ::: "memory");
++				rpm_wr(c, I_HALF + I_TAIL, W_HALF + W_TAIL, tail);
++				rpm_wr(c, I_HALF + I_FHEAD, W_HALF + W_FHEAD, 0);
++				rpm_wr(c, I_HALF + I_FTAIL, W_HALF + W_FTAIL, 1);
++				if (!rpm_rd(c, I_HALF + I_FBLOCK, W_HALF + W_FBLOCK)) {
++					kick();
++				}
++				return (int)len;
++			}
++		}
++		if (t >= ms) {
++			return 0;
++		}
++		vince_smd_sleep(5);
++	}
++}
 +
 +static void
 +rpm_dump_item(const char *what, uint32_t item)
@@ -119,17 +279,19 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +			uint32_t isz = 0, fsz = 0;
 +			vm_offset_t io = vince_smd_item(vtbls[t].info + cid, &isz);
 +			vm_offset_t fo = vince_smd_item(vtbls[t].fifo + cid, &fsz);
-+			if (!io || !fo || isz != 40 || fsz < 0x100 || (fsz & (fsz - 1))) {
++			if (!io || !fo || (isz != 40 && isz != 88) || fsz < 0x100 || (fsz & (fsz - 1))) {
 +				printf("VINCE RPM: %s cid %u: bad items (%#lx/%u %#lx/%u)\n", nm, cid,
 +				    (unsigned long)io, isz, (unsigned long)fo, fsz);
-+				return false;
 +				rpm_dump_item("info", vtbls[t].info + cid);
 +				rpm_dump_item("fifo", vtbls[t].fifo + cid);
++				return false;
 +			}
++			rpm_word = isz == 88;
 +			c->info = io;
 +			c->fifo = fo;
 +			c->half = fsz / 2;
-+			printf("VINCE RPM: rpm_requests cid %u, fifo %u bytes\n", cid, fsz);
++			printf("VINCE RPM: rpm_requests t%d cid %u, %s info, fifo %u bytes\n", t, cid,
++			    rpm_word ? "word" : "byte", fsz);
 +			return true;
 +		}
 +	}
@@ -153,8 +315,12 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +		printf("VINCE RPM: no rpm_requests channel\n");
 +		return false;
 +	}
-+	if (vince_smd_open(&rpm_ch)) {
-+		printf("VINCE RPM: rpm_requests did not open\n");
++	int r = rpm_open(&rpm_ch);
++
++	if (r) {
++		printf("VINCE RPM: rpm_requests open failed %d (tx %u rx %u)\n", r,
++		    rpm_rd(&rpm_ch, I_STATE, W_STATE),
++		    rpm_rd(&rpm_ch, I_HALF + I_STATE, W_HALF + W_STATE));
 +		return false;
 +	}
 +	rpm_opened = true;
@@ -198,11 +364,11 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +		rpm_put32(buf + 37, RPM_KEY_UV);
 +		rpm_put32(buf + 41, 4);
 +		rpm_put32(buf + 45, uv);
-+		if (vince_smd_send(&rpm_ch, buf, 49)) {
++		if (rpm_send(&rpm_ch, buf, 49)) {
 +			ok = false;
 +			break;
 +		}
-+		(void)vince_smd_recv(&rpm_ch, buf, sizeof(buf), 200);
++		(void)rpm_recv(&rpm_ch, buf, sizeof(buf), 200);
 +	}
 +	printf("VINCE RPM: ldo%u %u uV %s\n", id, uv, ok ? "requested" : "send failed");
 +	return ok;
