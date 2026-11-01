@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,356 @@
+@@ -430,5 +430,354 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -112,16 +112,14 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +static int
 +rpm_open(struct vsmd_ch *c)
 +{
-+	if (rpm_rd(c, I_HALF + I_STATE, W_HALF + W_STATE) == ST_CLOSED) {
-+		return -1;
-+	}
++	/* the RPM half starts closed: announce OPENING and let it answer */
 +	rpm_set_state(c, ST_OPENING);
-+	if (!rpm_wait_remote(c, ST_OPENING, ST_OPENED, 1000)) {
++	if (!rpm_wait_remote(c, ST_OPENING, ST_OPENED, 2000)) {
 +		rpm_set_state(c, ST_CLOSED);
 +		return -2;
 +	}
 +	rpm_set_state(c, ST_OPENED);
-+	if (!rpm_wait_remote(c, ST_OPENED, ST_OPENED, 1000)) {
++	if (!rpm_wait_remote(c, ST_OPENED, ST_OPENED, 2000)) {
 +		rpm_set_state(c, ST_CLOSED);
 +		return -3;
 +	}
