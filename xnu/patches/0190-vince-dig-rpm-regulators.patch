@@ -26,7 +26,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 + * RPM regulator requests (DIG-AL00). PM8937 LDOA5 (vcc_i2c 1.8 V) and LDOA10
 + * (touch VDD 2.8 V) belong to the RPM; LK leaves them off, so the FT5346 has
 + * no power and never answers on I2C. Same SMD transport as above, on the RPM
-+ * edge (15, host 6), doorbell APCS IPC bit 0. Request layout
++ * edge (15, host 6), global SMEM channel table, doorbell APCS IPC bit 0. Request layout
 + * (drivers/soc/qcom/rpm-smd.c):
 + *   {u32 "req", u32 len} {u32 msg_id, u32 set, u32 rsc_type, u32 rsc_id,
 + *   u32 data_len} then KVPs {u32 key, u32 size, data}.
@@ -49,7 +49,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +{
 +	uint32_t po, ps, cl;
 +
-+	if (!smem_partition(RPM_HOST_ID, &po, &ps, &cl, false)) {
++	if (!smem_partition(RPM_HOST_ID, &po, &ps, &cl, true)) {
 +		return false;
 +	}
 +	for (int t = 0; t < 2; t++) {
