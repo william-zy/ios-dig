@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,178 @@
+@@ -430,5 +430,179 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -25,13 +25,19 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +/*
 + * RPM regulator requests (DIG-AL00). PM8937 LDOA5 (vcc_i2c 1.8 V) and LDOA10
 + * (touch VDD 2.8 V) belong to the RPM; LK leaves them off, so the FT5346 has
-+ * no power and never answers on I2C. Same SMD transport as above, on the RPM
-+ * edge (15, host 6), global SMEM channel table, doorbell APCS IPC bit 0. Request layout
-+ * (drivers/soc/qcom/rpm-smd.c):
++ * no power and never answers on I2C.
++ *
++ * The RPM has no secured SMEM partition: the TOC in the last 4 KiB of SMEM lists
++ * only apps<->modem/Q6/WCNSS, so smem_get_entry() falls back to the legacy item
++ * table at 0xD0 for host 6 (vince_smd_item). Channel layout as in smd.c: the
++ * allocation table is item 13 (or 266 for the second stream), the 40-byte info
++ * page item 14 + cid (138 + cid) and the FIFO item 338 + cid (202 + cid).
++ * Same packet transport as Pronto; doorbell APCS IPC bit 0, as msm8937.dtsi
++ * qcom,smd-rpm says (edge 15, irq-bitmask 1). Request layout, from
++ * drivers/soc/qcom/rpm-smd.c:
 + *   {u32 "req", u32 len} {u32 msg_id, u32 set, u32 rsc_type, u32 rsc_id,
 + *   u32 data_len} then KVPs {u32 key, u32 size, data}.
 + */
-+#define RPM_HOST_ID     6u
 +#define RPM_EDGE_ID     15u
 +#define RPM_IPC_BIT     (1u << 0)
 +#define RPM_REQ_SERVICE 0x00716572u     /* "req" */
@@ -39,86 +45,85 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +#define RPM_KEY_SWEN    0x6e657773u     /* "swen" */
 +#define RPM_KEY_UV      0x00007675u     /* "uv" */
 +
-+static vm_offset_t rpm_smem, rpm_apcs;
 +static struct vsmd_ch rpm_ch;
 +static bool rpm_opened;
 +static uint32_t rpm_msg_id;
 +
++static void
++rpm_show_table(int t)
++{
++	uint32_t tsz = 0;
++	vm_offset_t tbl = vince_smd_item(vtbls[t].alloc, &tsz);
++
++	if (!tbl) {
++		printf("VINCE RPM: no allocation table %d\n", t);
++		return;
++	}
++	for (uint32_t i = 0; i < 8 && (i + 1) * 32 <= tsz; i++) {
++		vm_offset_t e = tbl + i * 32;
++		char nm[21];
++
++		for (int j = 0; j < 20; j += 4) {
++			uint32_t w = rd32(e + j);
++
++			for (int b = 0; b < 4; b++) {
++				char ch = (char)(w >> (8 * b));
++
++				nm[j + b] = (ch >= 0x20 && ch < 0x7f) ? ch : 0;
++			}
++		}
++		nm[20] = 0;
++		printf("VINCE RPM: t%d[%u] %s cid %u type %#x ref %u\n", t, i, nm,
++		    rd32(e + 20), rd32(e + 24), rd32(e + 28));
++	}
++}
++
++/* find "rpm_requests" in the legacy SMD allocation tables */
 +static bool
 +rpm_find(struct vsmd_ch *c)
 +{
-+	uint32_t po, ps, cl;
-+
-+	/* Dump the SMEM partition table: host encoding and sizes. */
-+	printf("VINCE RPM: toc %#x ver %u n %u\n", srd32(PTABLE_OFF), srd32(PTABLE_OFF + 4), srd32(PTABLE_OFF + 8));
-+	for (uint32_t i = 0; i < 24; i++) {
-+		uint32_t e = PTABLE_OFF + 32 + i * PTABLE_ENTRY;
-+		uint32_t o = srd32(e), sz = srd32(e + 4), h = srd32(e + 12);
-+		if (!o && !sz) {
-+			break;
-+		}
-+		printf("VINCE RPM: pt[%u] off %#x size %#x host %#x/%#x magic %#x\n", i, o, sz,
-+		    h & 0xffff, h >> 16, (o && o < SMEM_SIZE) ? srd32(o) : 0);
-+	}
-+	if (!smem_partition(RPM_HOST_ID, &po, &ps, &cl, true)) {
-+		printf("VINCE RPM: no global SMEM partition\n");
-+		return false;
-+	}
-+	printf("VINCE RPM: global partition %#x+%#x cl %u\n", po, ps, cl);
 +	for (int t = 0; t < 2; t++) {
-+		uint32_t tsz = 0, tbl = part_get(po, ps, cl, vtbls[t].alloc, &tsz);
++		uint32_t tsz = 0;
++		vm_offset_t tbl = vince_smd_item(vtbls[t].alloc, &tsz);
++
 +		if (!tbl) {
 +			continue;
 +		}
 +		for (uint32_t i = 0; i < 64 && (i + 1) * 32 <= tsz; i++) {
-+			uint32_t e = tbl + i * 32;
++			vm_offset_t e = tbl + i * 32;
 +			char nm[21];
++
 +			for (int j = 0; j < 20; j += 4) {
-+				uint32_t w = srd32(e + j);
++				uint32_t w = rd32(e + j);
++
 +				for (int b = 0; b < 4; b++) {
 +					char ch = (char)(w >> (8 * b));
++
 +					nm[j + b] = (ch >= 0x20 && ch < 0x7f) ? ch : 0;
 +				}
 +			}
 +			nm[20] = 0;
-+			uint32_t cid = srd32(e + 20), flags = srd32(e + 24), ref = srd32(e + 28);
++			uint32_t cid = rd32(e + 20), flags = rd32(e + 24), ref = rd32(e + 28);
 +			if (!nm[0] || !ref || (flags & 0xff) != RPM_EDGE_ID || strncmp(nm, "rpm_requests", 20) != 0) {
 +				continue;
 +			}
 +			uint32_t isz = 0, fsz = 0;
-+			uint32_t io = part_get(po, ps, cl, vtbls[t].info + cid, &isz);
-+			uint32_t fo = part_get(po, ps, cl, vtbls[t].fifo + cid, &fsz);
-+			if (!io || !fo || isz != 40 || fsz < 0x100 || (fsz & (fsz - 1)) || fo + fsz > SMEM_SIZE) {
++			vm_offset_t io = vince_smd_item(vtbls[t].info + cid, &isz);
++			vm_offset_t fo = vince_smd_item(vtbls[t].fifo + cid, &fsz);
++			if (!io || !fo || isz != 40 || fsz < 0x100 || (fsz & (fsz - 1))) {
++				printf("VINCE RPM: %s cid %u: bad items (%#lx/%u %#lx/%u)\n", nm, cid,
++				    (unsigned long)io, isz, (unsigned long)fo, fsz);
 +				return false;
 +			}
-+			c->info = rpm_smem + io;
-+			c->fifo = rpm_smem + fo;
++			c->info = io;
++			c->fifo = fo;
 +			c->half = fsz / 2;
++			printf("VINCE RPM: rpm_requests cid %u, fifo %u bytes\n", cid, fsz);
 +			return true;
 +		}
 +	}
-+	/* nothing matched: show the first entries so the naming or edge id is visible. */
-+	for (int t = 0; t < 2; t++) {
-+		uint32_t tsz = 0, tbl = part_get(po, ps, cl, vtbls[t].alloc, &tsz);
-+		if (!tbl) {
-+			printf("VINCE RPM: no alloc table for slot %d\n", t);
-+			continue;
-+		}
-+		for (uint32_t i = 0; i < 8 && (i + 1) * 32 <= tsz; i++) {
-+			uint32_t e = tbl + i * 32;
-+			char nm[21];
-+			for (int j = 0; j < 20; j += 4) {
-+				uint32_t w = srd32(e + j);
-+				for (int b = 0; b < 4; b++) {
-+					char ch = (char)(w >> (8 * b));
-+					nm[j + b] = (ch >= 0x20 && ch < 0x7f) ? ch : 0;
-+				}
-+			}
-+			nm[20] = 0;
-+			printf("VINCE RPM: t%d[%u] %s cid %u type %#x ref %u\n", t, i, nm,
-+			    srd32(e + 20), srd32(e + 24), srd32(e + 28));
-+		}
-+	}
++	rpm_show_table(0);
++	rpm_show_table(1);
 +	return false;
 +}
 +
@@ -128,20 +133,17 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	if (rpm_opened) {
 +		return true;
 +	}
-+	if (!rpm_smem) {
-+		rpm_smem = ml_io_map(SMEM_PA, SMEM_SIZE);
-+		rpm_apcs = ml_io_map(APCS_PA, 0x1000);
-+	}
-+	if (!rpm_smem || !rpm_apcs) {
++	if (!vince_smd_map()) {
++		printf("VINCE RPM: SMEM mapping failed\n");
 +		return false;
 +	}
-+	smem = rpm_smem;
-+	apcs = rpm_apcs;
 +	smd_irq_bit = RPM_IPC_BIT;
 +	if (!rpm_find(&rpm_ch)) {
++		printf("VINCE RPM: no rpm_requests channel\n");
 +		return false;
 +	}
 +	if (vince_smd_open(&rpm_ch)) {
++		printf("VINCE RPM: rpm_requests did not open\n");
 +		return false;
 +	}
 +	rpm_opened = true;
@@ -165,7 +167,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	bool ok = true;
 +
 +	if (!rpm_init()) {
-+		printf("VINCE RPM: no rpm_requests channel; ldo%u stays off\n", id);
++		printf("VINCE RPM: ldo%u stays off\n", id);
 +		return false;
 +	}
 +	for (uint32_t set = 0; set < 2; set++) {
@@ -194,5 +196,4 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	printf("VINCE RPM: ldo%u %u uV %s\n", id, uv, ok ? "requested" : "send failed");
 +	return ok;
 +}
-+
  #endif /* ARM64_BOARD_CONFIG_VINCE */
