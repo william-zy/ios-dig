@@ -1,13 +1,14 @@
 diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 --- a/bsd/dev/vince_smd.c
 +++ b/bsd/dev/vince_smd.c
-@@ -100,5 +100,6 @@
+@@ -100,6 +100,7 @@
  static vm_offset_t smem, apcs;
  static bool smd_started;
  static int smd_chan;
 +static uint32_t smd_irq_bit = APCS_IPC_WCNSS;
  
- struct vsmd_ch {
+ void
+ vince_smd_sleep(unsigned ms)
 @@ -158,6 +158,6 @@
  static void
  kick(void)
@@ -16,7 +17,11 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,1 +430,139 @@
+@@ -430,5 +430,143 @@
+ 	}
+ 	vince_wlan_start();
+ 	vince_bt_start();
+ }
 +/*
 + * RPM regulator requests (DIG-AL00). PM8937 LDOA5 (vcc_i2c 1.8 V) and LDOA10
 + * (touch VDD 2.8 V) belong to the RPM; LK leaves them off, so the FT5346 has
