@@ -20,7 +20,7 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 -	uint32_t addr8 = (RMI_ADDR << 1) | (rd ? 1u : 0u);
 +	uint32_t addr8 = (i2c_addr << 1) | (rd ? 1u : 0u);
  	uint32_t ntx = rd ? 2 : n + 1;
-@@ -414,10 +414,115 @@
+@@ -414,10 +414,127 @@
  static void
  touch_release_all(void)
  {
@@ -81,6 +81,18 @@ diff --git a/bsd/dev/vince_input.c b/bsd/dev/vince_input.c
 +		qup_clk_ctl = CLK_CTL_100K;
 +		r = ft_read(0xa3, &id, 1);
 +		printf("VINCE INPUT: FocalTech retry at 100 kHz read=%d\n", r);
++	}
++	if (r) {
++		/* Nothing answered: scan the bus to tell "chip unpowered" from "wrong address". */
++		for (uint32_t a = 0x08; a < 0x78; a++) {
++			uint8_t v = 0;
++			i2c_addr = a;
++			if (ft_read(0xa3, &v, 1) == 0) {
++				printf("VINCE INPUT: i2c ack at %#x (id %#x)\n", a, v);
++			}
++		}
++		i2c_addr = FT_ADDR;
++		printf("VINCE INPUT: i2c scan done\n");
 +	}
 +	printf("VINCE INPUT: FocalTech at %#x chip id %#x (read %d), %d points max\n",
 +	    i2c_addr, id, r, FT_MAX_POINTS);
