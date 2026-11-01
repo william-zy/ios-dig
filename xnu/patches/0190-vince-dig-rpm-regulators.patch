@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,379 @@
+@@ -430,5 +430,387 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -372,6 +372,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	vince_smd_sleep(2000);
 +	for (uint32_t set = 0; set < 2; set++) {
 +		uint32_t msg_id = ++rpm_msg_id;
++		int r, n;
 +
 +		memset(buf, 0, sizeof(buf));
 +		rpm_put32(buf + 0, RPM_REQ_SERVICE);
@@ -387,11 +388,18 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +		rpm_put32(buf + 37, RPM_KEY_UV);
 +		rpm_put32(buf + 41, 4);
 +		rpm_put32(buf + 45, uv);
-+		if (rpm_send(&rpm_ch, buf, 49)) {
++		printf("VINCE RPM: send set %u\n", set);
++		vince_smd_sleep(1000);
++		r = rpm_send(&rpm_ch, buf, 49);
++		printf("VINCE RPM: send set %u -> %d\n", set, r);
++		vince_smd_sleep(1000);
++		if (r) {
 +			ok = false;
 +			break;
 +		}
-+		(void)rpm_recv(&rpm_ch, buf, sizeof(buf), 200);
++		n = rpm_recv(&rpm_ch, buf, sizeof(buf), 100);
++		printf("VINCE RPM: recv set %u -> %d\n", set, n);
++		vince_smd_sleep(500);
 +	}
 +	printf("VINCE RPM: ldo%u %u uV %s\n", id, uv, ok ? "requested" : "send failed");
 +	return ok;
