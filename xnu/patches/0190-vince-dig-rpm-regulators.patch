@@ -106,7 +106,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	if (!rpm_find(&rpm_ch)) {
 +		return false;
 +	}
-+	if (vs_open(&rpm_ch)) {
++	if (vince_smd_open(&rpm_ch)) {
 +		return false;
 +	}
 +	rpm_opened = true;
@@ -130,7 +130,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +	bool ok = true;
 +
 +	if (!rpm_init()) {
-+		printf("VINCE RPM: no rpm_requests channel; ldo%u stays off"+NL+""", id);
++		printf("VINCE RPM: no rpm_requests channel; ldo%u stays off"\n", id);
 +		return false;
 +	}
 +	for (uint32_t set = 0; set < 2; set++) {
@@ -150,13 +150,13 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +		rpm_put32(buf + 37, RPM_KEY_UV);
 +		rpm_put32(buf + 41, 4);
 +		rpm_put32(buf + 45, uv);
-+		if (vs_send(&rpm_ch, buf, 49)) {
++		if (vince_smd_send(&rpm_ch, buf, 49)) {
 +			ok = false;
 +			break;
 +		}
-+		(void)vs_recv(&rpm_ch, buf, sizeof(buf), 200);
++		(void)vince_smd_recv(&rpm_ch, buf, sizeof(buf), 200);
 +	}
-+	printf("VINCE RPM: ldo%u %u uV %s"+NL+""", id, uv, ok ? "requested" : "send failed");
++	printf("VINCE RPM: ldo%u %u uV %s"\n", id, uv, ok ? "requested" : "send failed");
 +	return ok;
 +}
 +
