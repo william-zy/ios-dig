@@ -388,8 +388,8 @@ index 0000000..05294a8
 +{
 +	static const uint8_t blk[4] = {4, 16, 32, 0};
 +
-+	tlmm_cfg(GPIO_SDA, 2, 0, 0, false, false);      /* blsp_i2c3, no pull (board pull-ups), 2 mA */
-+	tlmm_cfg(GPIO_SCL, 2, 0, 0, false, false);
++	tlmm_cfg(GPIO_SDA, 3, 0, 0, false, false);      /* gpio10 funcs[3] = blsp_i2c3, no pull, 2 mA */
++	tlmm_cfg(GPIO_SCL, 3, 0, 0, false, false);      /* gpio11 funcs[3] = blsp_i2c3 */
 +	tlmm_cfg(GPIO_ATTN, 0, 3, 0, false, false);     /* input, pull-up */
 +	tlmm_cfg(GPIO_RST, 0, 3, 3, true, true);        /* out of reset */
 +	in_sleep(&touch_chan, 200);
