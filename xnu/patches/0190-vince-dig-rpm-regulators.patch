@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,167 @@
+@@ -430,5 +430,178 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -49,6 +49,17 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +{
 +	uint32_t po, ps, cl;
 +
++	/* Dump the SMEM partition table: host encoding and sizes. */
++	printf("VINCE RPM: toc %#x ver %u n %u\n", srd32(PTABLE_OFF), srd32(PTABLE_OFF + 4), srd32(PTABLE_OFF + 8));
++	for (uint32_t i = 0; i < 24; i++) {
++		uint32_t e = PTABLE_OFF + 32 + i * PTABLE_ENTRY;
++		uint32_t o = srd32(e), sz = srd32(e + 4), h = srd32(e + 12);
++		if (!o && !sz) {
++			break;
++		}
++		printf("VINCE RPM: pt[%u] off %#x size %#x host %#x/%#x magic %#x\n", i, o, sz,
++		    h & 0xffff, h >> 16, (o && o < SMEM_SIZE) ? srd32(o) : 0);
++	}
 +	if (!smem_partition(RPM_HOST_ID, &po, &ps, &cl, true)) {
 +		printf("VINCE RPM: no global SMEM partition\n");
 +		return false;
