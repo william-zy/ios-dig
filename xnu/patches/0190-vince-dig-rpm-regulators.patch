@@ -17,7 +17,7 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 -	wr32(apcs + APCS_IPC, APCS_IPC_WCNSS);
 +	wr32(apcs + APCS_IPC, smd_irq_bit);
  }
-@@ -430,5 +430,400 @@
+@@ -430,5 +430,406 @@
  	}
  	vince_wlan_start();
  	vince_bt_start();
@@ -382,7 +382,13 @@ diff --git a/bsd/dev/vince_smd.c b/bsd/dev/vince_smd.c
 +		return false;
 +	}
 +	printf("VINCE RPM: init ok\n");
-+	vince_smd_sleep(2000);
++	vince_smd_sleep(10000);
++	printf("VINCE RPM: post-init ok, fifo %#lx head %u tail %u\n", (unsigned long)rpm_ch.fifo,
++	    rpm_rd(&rpm_ch, I_HEAD, W_HEAD), rpm_rd(&rpm_ch, I_TAIL, W_TAIL));
++	vince_smd_sleep(1000);
++	wr8(rpm_ch.fifo, 0);
++	printf("VINCE RPM: fifo write ok\n");
++	vince_smd_sleep(5000);
 +	for (uint32_t set = 0; set < 2; set++) {
 +		uint32_t msg_id = ++rpm_msg_id;
 +		int r, n;
