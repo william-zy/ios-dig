@@ -1,6 +1,6 @@
 --- a/bsd/dev/vince_mmc.c
 +++ b/bsd/dev/vince_mmc.c
-@@ -698,6 +698,99 @@
+@@ -698,6 +698,109 @@
  	}
  }
  
@@ -22,12 +22,22 @@
 +static int vince_bcb_chan;
 +
 +static void
-+vince_psci_reset(void)
++vince_reset(void)
 +{
 +	register uint64_t x0 __asm__("x0") = 0x84000009u;       /* PSCI_SYSTEM_RESET */
++	vm_offset_t wdt;
 +
 +	__asm__ volatile("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "x4", "x5", "x6", "x7",
 +	    "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++
++	/* This firmware returns from PSCI without resetting; bite the APCS watchdog. */
++	wdt = ml_io_map(0xB017000, 0x1000);
++	if (wdt) {
++		*(volatile uint32_t *)(wdt + 0x08) = 0;         /* WDT0_EN off */
++		*(volatile uint32_t *)(wdt + 0x04) = 1;         /* WDT0_RST */
++		*(volatile uint32_t *)(wdt + 0x14) = 1;         /* WDT0_BITE_TIME = 1 tick */
++		*(volatile uint32_t *)(wdt + 0x08) = 1;         /* WDT0_EN on */
++	}
 +	for (;;) {
 +		__asm__ volatile("wfe");
 +	}
@@ -70,7 +80,7 @@
 +	if (on) {
 +		vince_bcb_write();
 +		(void)tsleep(&vince_bcb_chan, PZERO, "vincebcb", hz * 2);
-+		vince_psci_reset();
++		vince_reset();
 +	}
 +	for (;;) {
 +		bool pressed = tlmm && !(*(volatile uint32_t *)(tlmm + GPIO_IO(GPIO_VOLUP_DIG)) & 1u);
@@ -78,7 +88,7 @@
 +			printf("VINCE MMC: volume up held, rebooting into recovery\n");
 +			vince_bcb_write();
 +			(void)tsleep(&vince_bcb_chan, PZERO, "vincebcb", hz * 2);
-+			vince_psci_reset();
++			vince_reset();
 +		}
 +		if (!pressed) {
 +			held = 0;
@@ -100,7 +110,7 @@
  /* What the partition holds, for the log: the superblock magics at offset 1024 (HFS+, ext4, F2FS). */
  static const char *
  mmc_fs_signature(void)
-@@ -1009,6 +1102,7 @@
+@@ -1009,6 +1112,7 @@
  	vince_input_start();
  	vince_ctl_start();
  	vince_smd_start();
