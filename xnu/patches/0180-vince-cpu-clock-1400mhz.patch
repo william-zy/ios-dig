@@ -2,120 +2,257 @@ diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 index bbaec29..ea033f3 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -81,29 +81,103 @@ static uint32_t gVinceMHz[8];
+@@ -81,29 +81,238 @@ static uint32_t gVinceMHz[8];
   * put on CPUs 4-7 ran 40 times slower. Both clusters share VDD_APC, which already carries cluster 0 at 800 MHz:
   * give cluster 1 the same source. The A53 PLL (for more than 800 MHz) stays off; that needs CPR voltage control.
   */
 +extern "C" boolean_t PE_parse_boot_argn(const char *arg_string, void *arg_ptr, int max_arg);
++extern "C" void vince_smd_sleep(unsigned ms);
 +
 +/*
-+ * Vince CPU Clock Configuration:
-+ * LK leaves cluster 0 on GPLL0 (800 MHz) and cluster 1 on XO (19.2 MHz).
-+ * Initialize APCS A53 PLL at 0x0b116000 to 1401.6 MHz (L = 73, ref 19.2 MHz XO).
-+ * At default VDD_APC voltage (870 mV), 1401.6 MHz is fully within Qualcomm specs
-+ * (Corner 2 ceiling is 860 mV).
-+ * Switch both Cluster 0 (0x0b111050) and Cluster 1 (0x0b011050) to APCS A53 PLL (0x501).
++ * APCS clocks and VDD_APC for DIG-AL00 (PM8937).  CPU0 is cluster 1 (MPIDR
++ * 0x100): its RCG is at 0x0b011050 and its A53 PLL at 0x0b016000; cluster 0
++ * (CPUs 4-7) uses 0x0b111050 and 0x0b116000.  The vendor SR2 PLL layout
++ * (drivers/clk/msm/clock-pll.c) is MODE 0x00, L 0x04, M 0x08, N 0x0C,
++ * USER_CTL 0x10, CONFIG_CTL 0x14, STATUS 0x1C; the lock bit is STATUS bit 16
++ * and the enable order is BYPASSNL, 10 us, RESET_N, poll, then OUTCTRL.
++ * VDD_APC is PM8937 S5, driven through the cluster-1 SPM at 0x0b011200
++ * (SAW_RST 0x18, PMIC_STS 0x14, VCTL 0x1C, AVS_CTL 0x20, PMIC_DATA_3 0x4C).
++ * The CPR block at 0x0b018000 trims the rail for the boot frequency, so it is
++ * stopped before the voltage is raised.  Boot args: vincemhz (MHz, default
++ * 1401), vincevolt (mV, default 1300), vincecpr (1 = stop CPR, default 1),
++ * vincedry (1 = dump the clock state and return).
 + */
++static void
++vince_clk_dump(const char *tag, vm_offset_t pll, vm_offset_t rcg)
++{
++	uint32_t cfg = *(volatile uint32_t *)(rcg + 0x54);
++
++	IOLog("VINCE CLK: %s pll mode %#x l %u m %u n %u user %#x cfg %#x sts %#x\n", tag,
++	    *(volatile uint32_t *)(pll + 0x00), *(volatile uint32_t *)(pll + 0x04),
++	    *(volatile uint32_t *)(pll + 0x08), *(volatile uint32_t *)(pll + 0x0C),
++	    *(volatile uint32_t *)(pll + 0x10), *(volatile uint32_t *)(pll + 0x14),
++	    *(volatile uint32_t *)(pll + 0x1C));
++	IOLog("VINCE CLK: %s rcg cmd %#x cfg %#x src %u div %u\n", tag,
++	    *(volatile uint32_t *)(rcg + 0x50), cfg, (cfg >> 8) & 7u, cfg & 0x1Fu);
++}
++
++static bool
++vince_rcg_switch(vm_offset_t rcg, uint32_t val)
++{
++	volatile uint32_t *cmd = (volatile uint32_t *)(rcg + 0x50);
++	volatile uint32_t *cfg = (volatile uint32_t *)(rcg + 0x54);
++	int i;
++
++	*cfg = val;
++	__builtin_arm_dsb(DSB_SY);
++	*cmd = *cmd | 1u;               /* CMD_RCGR_CONFIG_UPDATE_BIT */
++	__builtin_arm_dsb(DSB_SY);
++	for (i = 0; i < 500; i++) {
++		if (!(*cmd & 1u)) {
++			return true;
++		}
++		IODelay(1);
++	}
++	IOLog("VINCE CLK: rcg %#lx update stuck, cmd %#x cfg %#x\n", (unsigned long)rcg, *cmd, *cfg);
++	return false;
++}
++
++static bool
++vince_pll_set(vm_offset_t pll, uint32_t l_val)
++{
++	uint32_t mode, user, sts = 0;
++	int i;
++
++	/* The RCG must already be on another source: this clears the output. */
++	mode = *(volatile uint32_t *)(pll + 0x00) & ~0xFu;
++	*(volatile uint32_t *)(pll + 0x00) = mode;
++	__builtin_arm_dsb(DSB_SY);
++	IODelay(10);
++
++	*(volatile uint32_t *)(pll + 0x04) = l_val;
++	*(volatile uint32_t *)(pll + 0x08) = 0;
++	*(volatile uint32_t *)(pll + 0x0C) = 0;
++	user = *(volatile uint32_t *)(pll + 0x10);
++	user &= ~((1u << 24) | (1u << 12) | (3u << 8) | (3u << 28));
++	user |= 1u;                     /* main output enable */
++	*(volatile uint32_t *)(pll + 0x10) = user;
++	__builtin_arm_dsb(DSB_SY);
++
++	mode |= 0x2;                    /* PLL_BYPASSNL */
++	*(volatile uint32_t *)(pll + 0x00) = mode;
++	__builtin_arm_dsb(DSB_SY);
++	IODelay(10);
++	mode |= 0x4;                    /* PLL_RESET_N */
++	*(volatile uint32_t *)(pll + 0x00) = mode;
++	__builtin_arm_dsb(DSB_SY);
++	for (i = 0; i < 200; i++) {
++		sts = *(volatile uint32_t *)(pll + 0x1C);
++		if (sts & (1u << 16)) {
++			break;
++		}
++		IODelay(1);
++	}
++	if (!(sts & (1u << 16))) {
++		IOLog("VINCE CLK: pll %#lx did not lock, mode %#x user %#x sts %#x\n",
++		    (unsigned long)pll, mode, user, sts);
++		return false;
++	}
++	mode |= 0x1;                    /* PLL_OUTCTRL */
++	*(volatile uint32_t *)(pll + 0x00) = mode;
++	__builtin_arm_dsb(DSB_SY);
++	IOLog("VINCE CLK: pll %#lx locked, L=%u, mode %#x user %#x sts %#x\n",
++	    (unsigned long)pll, l_val, mode, user, sts);
++	return true;
++}
++
++static void
++vince_cpr_stop(vm_offset_t cpr)
++{
++	uint32_t ctl = *(volatile uint32_t *)(cpr + 0x90);
++
++	*(volatile uint32_t *)(cpr + 0x90) = ctl & ~((1u << 0) | (1u << 3) | (1u << 5) | (1u << 6));
++	__builtin_arm_dsb(DSB_SY);
++	IOLog("VINCE CLK: CPR ctl %#x -> %#x, result %#x/%#x\n", ctl,
++	    *(volatile uint32_t *)(cpr + 0x90), *(volatile uint32_t *)(cpr + 0xA0),
++	    *(volatile uint32_t *)(cpr + 0xA4));
++}
++
++static bool
++vince_apc_voltage(vm_offset_t spm, uint32_t mv)
++{
++	uint32_t avs, vlevel, vctl, data3, sts = 0;
++	bool ok = false;
++	int i;
++
++	/* PM8937 S5 is FTS2.5 range 0: VSET = (uV - 80 mV) / 5 mV. */
++	vlevel = (mv * 1000u - 80000u) / 5000u;
++	if (vlevel > 0xFEu) {
++		vlevel = 0xFEu;
++	}
++	avs = *(volatile uint32_t *)(spm + 0x20);
++	if (avs & 1u) {
++		*(volatile uint32_t *)(spm + 0x20) = avs & ~(1u << 27);
++		__builtin_arm_dsb(DSB_SY);
++	}
++	*(volatile uint32_t *)(spm + 0x18) = 1;         /* SAW_RST: FSM to idle */
++	__builtin_arm_dsb(DSB_SY);
++	vctl = *(volatile uint32_t *)(spm + 0x1C);
++	data3 = *(volatile uint32_t *)(spm + 0x4C);
++	vctl = (vctl & ~0x700FFu) | (vlevel & 0xFFu);
++	data3 = (data3 & ~0x700FFu) | (vlevel & 0xFFu);
++	*(volatile uint32_t *)(spm + 0x1C) = vctl;
++	__builtin_arm_dsb(DSB_SY);
++	*(volatile uint32_t *)(spm + 0x4C) = data3;
++	__builtin_arm_dsb(DSB_SY);
++	for (i = 0; i < 2000; i++) {
++		sts = *(volatile uint32_t *)(spm + 0x14);
++		if ((sts & 0x30000u) == 0 && (sts & 0xFFu) == (vlevel & 0xFFu)) {
++			ok = true;
++			break;
++		}
++		IODelay(1);
++	}
++	if (avs & 1u) {
++		*(volatile uint32_t *)(spm + 0x20) = avs;
++		__builtin_arm_dsb(DSB_SY);
++	}
++	IOLog("VINCE CLK: S5 %u mV (vlevel %#x), sts %#x after %d us, %s\n", mv, vlevel, sts, i,
++	    ok ? "set" : "not confirmed");
++	return ok;
++}
  static void
 -vince_cluster1_clock(void)
 +vince_cpu_clock_init(void)
  {
-+	uint32_t target_mhz = 1401;
-+	PE_parse_boot_argn("vincemhz", &target_mhz, sizeof(target_mhz));
-+
  	vm_offset_t c0 = ml_io_map(0x0b111000, 0x1000), c1 = ml_io_map(0x0b011000, 0x1000);
  	if (!c0 || !c1) {
  		IOLog("VINCE CLK: mux mapping failed\n");
  		return;
  	}
-+
-+	volatile uint32_t *cmd0 = (volatile uint32_t *)(c0 + 0x50), *cfg0 = (volatile uint32_t *)(c0 + 0x54);
++	vm_offset_t pll0 = ml_io_map(0x0b116000, 0x1000), pll1 = ml_io_map(0x0b016000, 0x1000);
++	vm_offset_t cpr = ml_io_map(0x0b018000, 0x1000), spm = ml_io_map(0x0b011200, 0x100);
  	volatile uint32_t *cmd1 = (volatile uint32_t *)(c1 + 0x50), *cfg1 = (volatile uint32_t *)(c1 + 0x54);
 -	uint32_t cfg0 = *(volatile uint32_t *)(c0 + 0x54), old = *cfg1;
 -	if (((old >> 8) & 7) != 0 || ((cfg0 >> 8) & 7) != 4) {
 -		IOLog("VINCE CLK: cluster muxes c0 %#x c1 %#x, left alone\n", cfg0, old);
+-		return;
+-	}
+-	*cfg1 = cfg0;
++	uint32_t target_mhz = 1401, volt_mv = 1300, cpr_off = 1, dry = 0;
++	uint32_t src, l_val;
 +
-+	if (target_mhz == 800) {
-+		/* Fallback: keep GPLL0 800 MHz, align cluster 1 to cluster 0 */
-+		*cfg1 = *cfg0;
-+		__builtin_arm_dsb(DSB_SY);
-+		*cmd1 = *cmd1 | 1;
-+		__builtin_arm_dsb(DSB_SY);
-+		int i = 0;
-+		while ((*cmd1 & 1) && i++ < 1000) {
-+			IODelay(1);
-+		}
-+		IOLog("VINCE CLK: clusters kept at GPLL0 800 MHz\n");
++	PE_parse_boot_argn("vincemhz", &target_mhz, sizeof(target_mhz));
++	PE_parse_boot_argn("vincevolt", &volt_mv, sizeof(volt_mv));
++	PE_parse_boot_argn("vincecpr", &cpr_off, sizeof(cpr_off));
++	PE_parse_boot_argn("vincedry", &dry, sizeof(dry));
++
++	if (!pll0 || !pll1 || !cpr || !spm) {
++		IOLog("VINCE CLK: clock block mapping failed\n");
++		return;
++	}
++	(void)cmd1;
++	vince_clk_dump("c1", pll1, c1);
++	vince_clk_dump("c0", pll0, c0);
++	IOLog("VINCE CLK: CPR ver %#x ctl %#x result %#x/%#x\n",
++	    *(volatile uint32_t *)(cpr + 0x00), *(volatile uint32_t *)(cpr + 0x90),
++	    *(volatile uint32_t *)(cpr + 0xA0), *(volatile uint32_t *)(cpr + 0xA4));
++	IOLog("VINCE CLK: SPM c1 id %#x sts %#x vctl %#x avs %#x data3 %#x\n",
++	    *(volatile uint32_t *)(spm + 0x04), *(volatile uint32_t *)(spm + 0x14),
++	    *(volatile uint32_t *)(spm + 0x1C), *(volatile uint32_t *)(spm + 0x20),
++	    *(volatile uint32_t *)(spm + 0x4C));
++	if (dry) {
++		IOLog("VINCE CLK: dry run, clocks untouched\n");
++		return;
++	}
++	if (target_mhz <= 800) {
++		IOLog("VINCE CLK: target %u MHz, staying on GPLL0\n", target_mhz);
 +		return;
 +	}
 +
-+	vm_offset_t pll = ml_io_map(0x0b116000, 0x1000);
-+	if (!pll) {
-+		IOLog("VINCE CLK: PLL mapping failed\n");
- 		return;
- 	}
--	*cfg1 = cfg0;
-+
-+	uint32_t l_val = 73; /* default 1401.6 MHz */
-+	if (target_mhz == 1036) {
-+		l_val = 54; /* 1036.8 MHz */
++	src = (*cfg1 >> 8) & 7u;
++	if (src == 5u) {
++		/* Never pull the PLL out from under the running CPU. */
++		if (!vince_rcg_switch(c1, 0x401u)) {
++			IOLog("VINCE CLK: could not leave the A53 PLL, giving up\n");
++			return;
++		}
++		IOLog("VINCE CLK: c1 moved to GPLL0 before the PLL change\n");
 +	}
-+
-+	/* 1. Configure APCS A53 PLL */
-+	*(volatile uint32_t *)(pll + 0x20) = 0x200D4828; /* CONFIG_CTL_LO */
-+	*(volatile uint32_t *)(pll + 0x24) = 0x00000006; /* CONFIG_CTL_HI */
-+	*(volatile uint32_t *)(pll + 0x30) = 0x1C000000; /* TEST_CTL_LO */
-+	*(volatile uint32_t *)(pll + 0x34) = 0x00004000; /* TEST_CTL_HI */
-+	*(volatile uint32_t *)(pll + 0x18) = 0x00000109; /* USER_CTL: post_div 0x100 | early 0x8 | main 0x1 */
-+	*(volatile uint32_t *)(pll + 0x08) = l_val;      /* L_VAL */
-+
-+	/* 2. Enable PLL */
-+	*(volatile uint32_t *)(pll + 0x00) = 0x2;        /* PLL_BYPASSNL */
  	__builtin_arm_dsb(DSB_SY);
 -	*cmd1 = *cmd1 | 1;          /* UPDATE */
-+	IODelay(10);
-+	*(volatile uint32_t *)(pll + 0x00) = 0x6;        /* PLL_BYPASSNL | PLL_RESET_N */
++	if (cpr_off) {
++		vince_cpr_stop(cpr);
++	}
++	if (volt_mv >= 1000) {
++		if (!vince_apc_voltage(spm, volt_mv) && target_mhz > 1000) {
++			IOLog("VINCE CLK: S5 did not take the new level, not raising the clock\n");
++			return;
++		}
++	}
++	vince_smd_sleep(2000);
  	__builtin_arm_dsb(DSB_SY);
 -	int i = 0;
 -	while ((*cmd1 & 1) && i++ < 1000) {
-+
-+	/* 3. Wait for lock (bit 31) */
-+	int timeout = 10000;
-+	while ((*(volatile uint32_t *)(pll + 0x00) & (1U << 31)) == 0 && timeout--) {
++	l_val = (target_mhz * 1000u + 9600u) / 19200u;
++	if (!vince_pll_set(pll1, l_val)) {
++		IOLog("VINCE CLK: c1 stays on GPLL0 at 800 MHz\n");
++		return;
++	}
++	vince_smd_sleep(2000);
++	for (int i = 0; i < 500; i++) {
  		IODelay(1);
  	}
 -	IOLog("VINCE CLK: cluster 1 mux %#x -> %#x (as cluster 0)%s\n", old, *cfg1, (*cmd1 & 1) ? ", update stuck" : "");
-+	if (timeout <= 0) {
-+		IOLog("VINCE CLK: APCS PLL lock failed: %#x\n", *(volatile uint32_t *)(pll + 0x00));
-+		return;
++	if (vince_rcg_switch(c1, 0x501u)) {
++		IOLog("VINCE CLK: c1 now on the A53 PLL, %u MHz (L=%u)\n", target_mhz, l_val);
++	} else {
++		IOLog("VINCE CLK: c1 switch failed, still on GPLL0\n");
 +	}
-+	*(volatile uint32_t *)(pll + 0x00) = 0x7;        /* PLL_OUTCTRL */
-+	__builtin_arm_dsb(DSB_SY);
-+
-+	/* 4. Switch Cluster 0 and Cluster 1 muxes to A53 PLL (src_sel = 5, div = 1 -> 0x501) */
-+	*cfg0 = 0x501;
-+	__builtin_arm_dsb(DSB_SY);
-+	*cmd0 = *cmd0 | 1;
-+	__builtin_arm_dsb(DSB_SY);
-+	timeout = 1000;
-+	while ((*cmd0 & 1) && timeout--) {
-+		IODelay(1);
-+	}
-+
-+	*cfg1 = 0x501;
-+	__builtin_arm_dsb(DSB_SY);
-+	*cmd1 = *cmd1 | 1;
-+	__builtin_arm_dsb(DSB_SY);
-+	timeout = 1000;
-+	while ((*cmd1 & 1) && timeout--) {
-+		IODelay(1);
-+	}
-+
-+	IOLog("VINCE CLK: APCS PLL locked (L=%u), both clusters set to A53 PLL (0x501)\n", l_val);
  }
  static uint32_t gVinceBootRegistered;   /* the boot CPU finished processor_start */
  static uint32_t gVinceStarted;
-@@ -214,7 +288,7 @@ SweetCPU::start(IOService *provider)
+@@ -214,7 +423,7 @@ SweetCPU::start(IOService *provider)
  
  #if defined(VINCE)
  	if (boot) {
