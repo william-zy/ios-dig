@@ -2,7 +2,7 @@ diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 index bbaec29..ea033f3 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -81,29 +81,241 @@ static uint32_t gVinceMHz[8];
+@@ -81,29 +81,273 @@ static uint32_t gVinceMHz[8];
   * put on CPUs 4-7 ran 40 times slower. Both clusters share VDD_APC, which already carries cluster 0 at 800 MHz:
   * give cluster 1 the same source. The A53 PLL (for more than 800 MHz) stays off; that needs CPR voltage control.
   */
@@ -121,47 +121,79 @@ index bbaec29..ea033f3 100644
 +}
 +
 +static bool
-+vince_apc_voltage(vm_offset_t spm, uint32_t mv)
++vince_spmi_xfer(uint8_t sid, uint16_t addr, bool write, uint8_t *val)
 +{
-+	uint32_t avs, vlevel, vctl, data3, sts = 0;
-+	bool ok = false;
++	vm_offset_t core = ml_io_map(0x0200F000, 0x1000);
++	vm_offset_t chnls = ml_io_map(0x02400000, 0x800000);
++	uint16_t ppid = ((uint16_t)sid << 8) | (addr >> 8);
++	uint16_t apid = 0xFFFF;
++	vm_offset_t ch;
++	uint32_t map;
 +	int i;
 +
-+	/* PM8937 S5 is FTS2.5 range 0: VSET = (uV - 80 mV) / 5 mV. */
-+	vlevel = (mv * 1000u - 80000u) / 5000u;
-+	if (vlevel > 0xFEu) {
-+		vlevel = 0xFEu;
++	if (!core || !chnls) {
++		return false;
 +	}
-+	avs = *(volatile uint32_t *)(spm + 0x20);
-+	if (avs & 1u) {
-+		*(volatile uint32_t *)(spm + 0x20) = avs & ~(1u << 27);
-+		__builtin_arm_dsb(DSB_SY);
-+	}
-+	*(volatile uint32_t *)(spm + 0x18) = 1;         /* SAW_RST: FSM to idle */
-+	__builtin_arm_dsb(DSB_SY);
-+	vctl = *(volatile uint32_t *)(spm + 0x1C);
-+	data3 = *(volatile uint32_t *)(spm + 0x4C);
-+	vctl = (vctl & ~0x700FFu) | (vlevel & 0xFFu);
-+	data3 = (data3 & ~0x700FFu) | (vlevel & 0xFFu);
-+	*(volatile uint32_t *)(spm + 0x1C) = vctl;
-+	__builtin_arm_dsb(DSB_SY);
-+	*(volatile uint32_t *)(spm + 0x4C) = data3;
-+	__builtin_arm_dsb(DSB_SY);
-+	for (i = 0; i < 2000; i++) {
-+		sts = *(volatile uint32_t *)(spm + 0x14);
-+		if ((sts & 0x30000u) == 0 && (sts & 0xFFu) == (vlevel & 0xFFu)) {
-+			ok = true;
++	for (uint32_t a = 0; a < 256; a++) {
++		map = *(volatile uint32_t *)(core + 0x800 + 4 * a);
++		if (map && ((map >> 8) & 0xFFFu) == ppid) {
++			apid = (uint16_t)a;
 +			break;
++		}
++	}
++	if (apid == 0xFFFF) {
++		IOLog("VINCE CLK: no SPMI APID for ppid %#x\n", ppid);
++		return false;
++	}
++	ch = chnls + 0x8000u * apid;
++	*(volatile uint32_t *)(ch + 0x10) = write ? *val : 0;
++	__builtin_arm_dsb(DSB_SY);
++	*(volatile uint32_t *)(ch + 0x00) = ((write ? 0u : 1u) << 27) | ((addr & 0xFFu) << 4);
++	__builtin_arm_dsb(DSB_SY);
++	for (i = 0; i < 100; i++) {
++		uint32_t st = *(volatile uint32_t *)(ch + 0x08);
++		if (st & 1u) {
++			if (st & 0x0Eu) {
++				IOLog("VINCE CLK: spmi %s %#x status %#x\n", write ? "write" : "read", addr, st);
++				return false;
++			}
++			if (!write) {
++				*val = (uint8_t)(*(volatile uint32_t *)(ch + 0x18) & 0xFFu);
++			}
++			return true;
 +		}
 +		IODelay(1);
 +	}
-+	if (avs & 1u) {
-+		*(volatile uint32_t *)(spm + 0x20) = avs;
-+		__builtin_arm_dsb(DSB_SY);
++	return false;
++}
++
++static bool
++vince_apc_voltage(vm_offset_t spm, uint32_t mv)
++{
++	uint32_t vlevel = (mv * 1000u - 80000u) / 5000u;
++	uint8_t want, got = 0;
++
++	(void)spm;
++	if (vlevel > 0xFEu) {
++		vlevel = 0xFEu;
 +	}
-+	IOLog("VINCE CLK: S5 %u mV (vlevel %#x), sts %#x after %d us, %s\n", mv, vlevel, sts, i,
-+	    ok ? "set" : "not confirmed");
-+	return ok;
++	want = (uint8_t)vlevel;
++	if (vince_spmi_xfer(0, 0x2041, false, &got)) {
++		IOLog("VINCE CLK: S5 VSET %#x (%u mV)\n", got, got * 5u + 80u);
++	} else {
++		IOLog("VINCE CLK: S5 VSET read failed\n");
++	}
++	if (!vince_spmi_xfer(0, 0x2041, true, &want)) {
++		IOLog("VINCE CLK: S5 VSET write failed\n");
++		return false;
++	}
++	IODelay(100);
++	if (!vince_spmi_xfer(0, 0x2041, false, &got)) {
++		IOLog("VINCE CLK: S5 VSET readback failed\n");
++		return false;
++	}
++	IOLog("VINCE CLK: S5 VSET wrote %#x, reads %#x (%u mV)\n", want, got, got * 5u + 80u);
++	return got == want;
 +}
  static void
 -vince_cluster1_clock(void)
@@ -255,7 +287,7 @@ index bbaec29..ea033f3 100644
  }
  static uint32_t gVinceBootRegistered;   /* the boot CPU finished processor_start */
  static uint32_t gVinceStarted;
-@@ -214,7 +426,7 @@ SweetCPU::start(IOService *provider)
+@@ -214,7 +458,7 @@ SweetCPU::start(IOService *provider)
  
  #if defined(VINCE)
  	if (boot) {
