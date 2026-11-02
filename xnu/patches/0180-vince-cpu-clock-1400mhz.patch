@@ -2,7 +2,7 @@ diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 index bbaec29..ea033f3 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -81,29 +81,255 @@ static uint32_t gVinceMHz[8];
+@@ -81,29 +81,278 @@ static uint32_t gVinceMHz[8];
   * put on CPUs 4-7 ran 40 times slower. Both clusters share VDD_APC, which already carries cluster 0 at 800 MHz:
   * give cluster 1 the same source. The A53 PLL (for more than 800 MHz) stays off; that needs CPR voltage control.
   */
@@ -163,6 +163,28 @@ index bbaec29..ea033f3 100644
 +	    ok ? "set" : "not confirmed");
 +	return ok;
 +}
++static vm_offset_t vince_c0_base;
++static uint32_t vince_c0_ready;
++
++/*
++ * The C0 RCG update does not complete while cluster 0 is power-collapsed,
++ * so the boot CPU only locks the C0 PLL.  The first cluster-0 CPU to run
++ * initCPU switches the RCG while its cluster is active.
++ */
++static void
++vince_c0_kick(void)
++{
++	if (!vince_c0_ready || !vince_c0_base) {
++		return;
++	}
++	if (__sync_bool_compare_and_swap(&vince_c0_ready, 1u, 0u)) {
++		if (vince_rcg_switch(vince_c0_base, 0x501u)) {
++			IOLog("VINCE CLK: c0 rcg switched to the A53 PLL\n");
++		} else {
++			IOLog("VINCE CLK: c0 rcg switch failed\n");
++		}
++	}
++}
  static void
 -vince_cluster1_clock(void)
 +vince_cpu_clock_init(void)
@@ -262,14 +284,15 @@ index bbaec29..ea033f3 100644
 +	if (vincec0 > 800) {
 +		uint32_t l0 = (vincec0 * 1000u + 9600u) / 19200u;
 +		if (vince_pll_set(pll0, l0)) {
-+			(void)vince_rcg_switch(c0, 0x501u);
-+			IOLog("VINCE CLK: c0 now on its A53 PLL, %u MHz (L=%u)\n", vincec0, l0);
++			vince_c0_base = c0;
++			vince_c0_ready = 1;
++			IOLog("VINCE CLK: c0 PLL ready at %u MHz (L=%u)\n", vincec0, l0);
 +		}
 +	}
  }
  static uint32_t gVinceBootRegistered;   /* the boot CPU finished processor_start */
  static uint32_t gVinceStarted;
-@@ -214,7 +440,7 @@ SweetCPU::start(IOService *provider)
+@@ -214,7 +463,7 @@ SweetCPU::start(IOService *provider)
  
  #if defined(VINCE)
  	if (boot) {
@@ -278,3 +301,12 @@ index bbaec29..ea033f3 100644
  		vm_offset_t marks = ml_io_map(0x913F0000, 0x1000);
  		if (marks) {
  			for (int i = 0; i < 8; i++) {
+@@ -305,5 +554,8 @@ SweetCPU::initCPU(bool boot)
+ #if defined(VINCE)
+ 	vince_smp_mark(0x31);
++	if (!fBoot && (fPhysId & 0x100u) == 0) {
++		vince_c0_kick();
++	}
+ 	if (getCPUNumber() < 8) {
+ 		gVinceMHz[getCPUNumber()] = vince_cpu_mhz();
+ 	}
