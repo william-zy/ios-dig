@@ -1,6 +1,6 @@
 --- a/bsd/dev/vince_mmc.c
 +++ b/bsd/dev/vince_mmc.c
-@@ -698,6 +698,109 @@
+@@ -698,6 +698,123 @@
  	}
  }
  
@@ -66,6 +66,12 @@
 +	printf("VINCE MMC: BCB %s (%d)\n", error ? "write failed" : "boot-recovery set", error);
 +}
 +
++static bool
++vince_volup_down(vm_offset_t tlmm)
++{
++	return tlmm && !(*(volatile uint32_t *)(tlmm + GPIO_IO(GPIO_VOLUP_DIG)) & 1u);
++}
++
 +static void
 +vince_bcb_thread(__unused void *arg, __unused wait_result_t wr)
 +{
@@ -83,9 +89,17 @@
 +		vince_reset();
 +	}
 +	for (;;) {
-+		bool pressed = tlmm && !(*(volatile uint32_t *)(tlmm + GPIO_IO(GPIO_VOLUP_DIG)) & 1u);
++		bool pressed = vince_volup_down(tlmm);
 +		if (pressed && ++held >= 20) {
-+			printf("VINCE MMC: volume up held, rebooting into recovery\n");
++			/*
++			 * Wait for the release: the bootloader's own volume-up
++			 * handler would otherwise send the reset into erecovery
++			 * instead of the recovery partition.
++			 */
++			while (vince_volup_down(tlmm)) {
++				(void)tsleep(&vince_bcb_chan, PZERO, "vincebcb", hz / 20);
++			}
++			printf("VINCE MMC: volume up released, rebooting into recovery\n");
 +			vince_bcb_write();
 +			(void)tsleep(&vince_bcb_chan, PZERO, "vincebcb", hz * 2);
 +			vince_reset();
@@ -110,7 +124,7 @@
  /* What the partition holds, for the log: the superblock magics at offset 1024 (HFS+, ext4, F2FS). */
  static const char *
  mmc_fs_signature(void)
-@@ -1009,6 +1112,7 @@
+@@ -1009,6 +1126,7 @@
  	vince_input_start();
  	vince_ctl_start();
  	vince_smd_start();
