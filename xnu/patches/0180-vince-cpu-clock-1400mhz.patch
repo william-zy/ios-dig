@@ -2,7 +2,7 @@ diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 index bbaec29..ea033f3 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -81,29 +81,247 @@ static uint32_t gVinceMHz[8];
+@@ -81,29 +81,255 @@ static uint32_t gVinceMHz[8];
   * put on CPUs 4-7 ran 40 times slower. Both clusters share VDD_APC, which already carries cluster 0 at 800 MHz:
   * give cluster 1 the same source. The A53 PLL (for more than 800 MHz) stays off; that needs CPR voltage control.
   */
@@ -182,14 +182,15 @@ index bbaec29..ea033f3 100644
 -		return;
 -	}
 -	*cfg1 = cfg0;
-+	uint32_t target_mhz = 800, volt_mv = 0, cpr_off = 0, dump = 0;
++	uint32_t target_mhz = 800, volt_mv = 0, cpr_off = 0, dump = 0, vincec0 = 0;
 +	uint32_t src, l_val;
 +
 +	PE_parse_boot_argn("vincemhz", &target_mhz, sizeof(target_mhz));
 +	PE_parse_boot_argn("vincevolt", &volt_mv, sizeof(volt_mv));
 +	PE_parse_boot_argn("vincecpr", &cpr_off, sizeof(cpr_off));
 +	PE_parse_boot_argn("vincedump", &dump, sizeof(dump));
-+	IOLog("VINCE CLK: boot args mhz %u volt %u cpr %u dump %u\n", target_mhz, volt_mv, cpr_off, dump);
++	PE_parse_boot_argn("vincec0", &vincec0, sizeof(vincec0));
++	IOLog("VINCE CLK: boot args mhz %u volt %u cpr %u dump %u c0 %u\n", target_mhz, volt_mv, cpr_off, dump, vincec0);
 +
 +	if (!pll0 || !pll1 || !cpr || !spm || !cci_spm) {
 +		IOLog("VINCE CLK: clock block mapping failed\n");
@@ -258,10 +259,17 @@ index bbaec29..ea033f3 100644
 +	} else {
 +		IOLog("VINCE CLK: c1 switch failed, still on GPLL0\n");
 +	}
++	if (vincec0 > 800) {
++		uint32_t l0 = (vincec0 * 1000u + 9600u) / 19200u;
++		if (vince_pll_set(pll0, l0)) {
++			(void)vince_rcg_switch(c0, 0x501u);
++			IOLog("VINCE CLK: c0 now on its A53 PLL, %u MHz (L=%u)\n", vincec0, l0);
++		}
++	}
  }
  static uint32_t gVinceBootRegistered;   /* the boot CPU finished processor_start */
  static uint32_t gVinceStarted;
-@@ -214,7 +432,7 @@ SweetCPU::start(IOService *provider)
+@@ -214,7 +440,7 @@ SweetCPU::start(IOService *provider)
  
  #if defined(VINCE)
  	if (boot) {
