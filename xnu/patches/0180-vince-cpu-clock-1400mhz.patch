@@ -2,7 +2,7 @@ diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 index bbaec29..ea033f3 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -81,29 +81,273 @@ static uint32_t gVinceMHz[8];
+@@ -81,29 +81,275 @@ static uint32_t gVinceMHz[8];
   * put on CPUs 4-7 ran 40 times slower. Both clusters share VDD_APC, which already carries cluster 0 at 800 MHz:
   * give cluster 1 the same source. The A53 PLL (for more than 800 MHz) stays off; that needs CPR voltage control.
   */
@@ -124,14 +124,13 @@ index bbaec29..ea033f3 100644
 +vince_spmi_xfer(uint8_t sid, uint16_t addr, bool write, uint8_t *val)
 +{
 +	vm_offset_t core = ml_io_map(0x0200F000, 0x1000);
-+	vm_offset_t chnls = ml_io_map(0x02400000, 0x800000);
 +	uint16_t ppid = ((uint16_t)sid << 8) | (addr >> 8);
 +	uint16_t apid = 0xFFFF;
 +	vm_offset_t ch;
 +	uint32_t map;
 +	int i;
 +
-+	if (!core || !chnls) {
++	if (!core) {
 +		return false;
 +	}
 +	for (uint32_t a = 0; a < 256; a++) {
@@ -145,7 +144,10 @@ index bbaec29..ea033f3 100644
 +		IOLog("VINCE CLK: no SPMI APID for ppid %#x\n", ppid);
 +		return false;
 +	}
-+	ch = chnls + 0x8000u * apid;
++	ch = ml_io_map(0x02400000u + 0x8000u * apid, 0x1000);
++	if (!ch) {
++		return false;
++	}
 +	*(volatile uint32_t *)(ch + 0x10) = write ? *val : 0;
 +	__builtin_arm_dsb(DSB_SY);
 +	*(volatile uint32_t *)(ch + 0x00) = ((write ? 0u : 1u) << 27) | ((addr & 0xFFu) << 4);
@@ -287,7 +289,7 @@ index bbaec29..ea033f3 100644
  }
  static uint32_t gVinceBootRegistered;   /* the boot CPU finished processor_start */
  static uint32_t gVinceStarted;
-@@ -214,7 +458,7 @@ SweetCPU::start(IOService *provider)
+@@ -214,7 +460,7 @@ SweetCPU::start(IOService *provider)
  
  #if defined(VINCE)
  	if (boot) {
