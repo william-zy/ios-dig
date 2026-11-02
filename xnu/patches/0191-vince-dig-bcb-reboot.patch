@@ -14,7 +14,7 @@
 + * does it.
 + */
 +#define TLMM_PA         0x01000000u
-+#define TLMM_SIZE       0x56000u
++#define TLMM_SIZE       0x300000u
 +#define GPIO_CTL(n)     ((uint32_t)(n) * 0x1000u)
 +#define GPIO_IO(n)      (GPIO_CTL(n) + 4u)
 +#define GPIO_VOLUP_DIG  91
