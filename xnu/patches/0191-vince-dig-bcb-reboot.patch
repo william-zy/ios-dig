@@ -1,0 +1,110 @@
+--- a/bsd/dev/vince_mmc.c
++++ b/bsd/dev/vince_mmc.c
+@@ -698,6 +698,99 @@
+ 	}
+ }
+ 
++/*
++ * Reboot into recovery without a power cycle.  TWRP lives in the recovery
++ * partition, but the bootloader's key combination enters erecovery instead;
++ * the only other way in is the bootloader control block in "misc".  Write
++ * "boot-recovery" there and reset through PSCI (arm,psci-1.0, method=smc), so
++ * the eMMC stays powered and userdata survives.  vincebcb=1 triggers it at
++ * boot; otherwise holding volume up (TLMM GPIO 91, active low) for a second
++ * does it.
++ */
++#define TLMM_PA         0x01000000u
++#define TLMM_SIZE       0x56000u
++#define GPIO_CTL(n)     ((uint32_t)(n) * 0x1000u)
++#define GPIO_IO(n)      (GPIO_CTL(n) + 4u)
++#define GPIO_VOLUP_DIG  91
++
++static int vince_bcb_chan;
++
++static void
++vince_psci_reset(void)
++{
++	register uint64_t x0 __asm__("x0") = 0x84000009u;       /* PSCI_SYSTEM_RESET */
++
++	__asm__ volatile("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "x4", "x5", "x6", "x7",
++	    "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++	for (;;) {
++		__asm__ volatile("wfe");
++	}
++}
++
++static void
++vince_bcb_write(void)
++{
++	static const char msg[] = "boot-recovery";
++	uint64_t first = vm.first, nsect = vm.nsect;
++	bool rw = vm.rw;
++	int error;
++
++	lck_mtx_lock(&vince_mmc_lock);
++	error = mmc_find_partition("misc");
++	if (!error) {
++		vm.rw = true;
++		bzero(vince_mmc_bounce, 4 * SECTOR);
++		memcpy(vince_mmc_bounce, msg, sizeof(msg) - 1);
++		error = mmc_write_sectors(0, 4);
++		vm.rw = rw;
++	}
++	vm.first = first;
++	vm.nsect = nsect;
++	lck_mtx_unlock(&vince_mmc_lock);
++	printf("VINCE MMC: BCB %s (%d)\n", error ? "write failed" : "boot-recovery set", error);
++}
++
++static void
++vince_bcb_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	vm_offset_t tlmm = ml_io_map(TLMM_PA, TLMM_SIZE);
++	int on = 0, held = 0;
++
++	(void)PE_parse_boot_argn("vincebcb", &on, sizeof(on));
++	if (tlmm) {
++		uint32_t ctl = *(volatile uint32_t *)(tlmm + GPIO_CTL(GPIO_VOLUP_DIG));
++		*(volatile uint32_t *)(tlmm + GPIO_CTL(GPIO_VOLUP_DIG)) = (ctl & ~0x3ffu) | 3u;
++	}
++	if (on) {
++		vince_bcb_write();
++		(void)tsleep(&vince_bcb_chan, PZERO, "vincebcb", hz * 2);
++		vince_psci_reset();
++	}
++	for (;;) {
++		bool pressed = tlmm && !(*(volatile uint32_t *)(tlmm + GPIO_IO(GPIO_VOLUP_DIG)) & 1u);
++		if (pressed && ++held >= 20) {
++			printf("VINCE MMC: volume up held, rebooting into recovery\n");
++			vince_bcb_write();
++			(void)tsleep(&vince_bcb_chan, PZERO, "vincebcb", hz * 2);
++			vince_psci_reset();
++		}
++		if (!pressed) {
++			held = 0;
++		}
++		(void)tsleep(&vince_bcb_chan, PZERO, "vincebcb", hz / 20);
++	}
++}
++
++static void
++vince_bcb_start(void)
++{
++	thread_t thread;
++
++	if (kernel_thread_start(vince_bcb_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++
+ /* What the partition holds, for the log: the superblock magics at offset 1024 (HFS+, ext4, F2FS). */
+ static const char *
+ mmc_fs_signature(void)
+@@ -1009,6 +1102,7 @@
+ 	vince_input_start();
+ 	vince_ctl_start();
+ 	vince_smd_start();
++	vince_bcb_start();
+ 	return 0;
+ }
+ 
