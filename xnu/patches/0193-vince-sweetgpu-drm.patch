@@ -10,11 +10,12 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  extern "C" {
  uint64_t kvtophys(vm_offset_t va);
  bool vince_gpu_ready(void);
-@@ -26,9 +28,23 @@
+@@ -26,9 +28,24 @@
  uint32_t vince_gpu_last(void);
  void VinceGPUStart(void);
  void VinceGPUStop(void);
 +void flush_dcache64(addr64_t addr, unsigned count, int phys);
++void proc_selfname(char *buf, int size);
  }
  
  enum {
@@ -34,7 +35,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  	kDrmGemClose            = 0x09,
  	kMsmGetParam            = 0x40,
  	kMsmSetParam            = 0x41,
-@@ -102,13 +118,28 @@
+@@ -102,13 +119,28 @@
  
  #define GPU_BUFFERS 1024
  #define GPU_BUFFER_MAX (256ull << 20)
@@ -64,7 +65,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  };
  
  static IOLock *gGPULock = NULL;
-@@ -215,6 +246,12 @@
+@@ -215,12 +247,21 @@
  	IOReturn gemNew(struct msm_gem_new *request);
  	IOReturn gemInfo(struct msm_gem_info *request);
  	IOReturn submit(struct msm_gem_submit *request);
@@ -77,7 +78,32 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  	void freeBuffer(struct gpu_buffer *b);
  
  	task_t fTask;
-@@ -248,10 +285,39 @@
+ 	struct gpu_buffer *fBuffers;
+ 	uint32_t fNextBuffer;
+ 	uint32_t fNextQueue;
++	bool fLoggedInfo;
++	bool fLoggedNew;
++	bool fLoggedSubmit;
+ };
+ 
+ OSDefineMetaClassAndStructors(VinceGPUUserClient, IOUserClient);
+@@ -234,7 +275,15 @@
+ 	fTask = owningTask;
+ 	fNextBuffer = 0;
+ 	fNextQueue = 0;
++	fLoggedInfo = false;
++	fLoggedNew = false;
++	fLoggedSubmit = false;
+ 	fBuffers = (struct gpu_buffer *)IOMallocZero(sizeof(struct gpu_buffer) * GPU_BUFFERS);
++	if (fBuffers != NULL) {
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("VinceGPU: client opened by %s\n", name);
++	}
+ 	return fBuffers != NULL;
+ }
+ 
+@@ -248,10 +297,39 @@
  VinceGPUUserClient::freeBuffer(struct gpu_buffer *b)
  {
  	if (b->memory != NULL) {
@@ -117,7 +143,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  }
  
  IOReturn
-@@ -407,6 +473,257 @@
+@@ -407,6 +485,270 @@
  		IOFree(cmds, request->nr_cmds * sizeof(*cmds));
  	}
  	return ret;
@@ -199,6 +225,12 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
 +		memory->release();
 +		return kIOReturnNoResources;
 +	}
++	if (!fLoggedNew) {
++		fLoggedNew = true;
++		IOLog("VinceGPU: new bo %u size %llu at %#llx, user %#llx\n", slot + 1,
++		    (unsigned long long)rounded, (unsigned long long)base,
++		    (unsigned long long)umap->getAddress());
++	}
 +	out[0] = slot + 1;
 +	out[1] = base;
 +	out[2] = umap->getAddress();
@@ -276,6 +308,8 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
 +		surface->release();
 +		return kIOReturnNoResources;
 +	}
++	IOLog("VinceGPU: import surface %u size %llu at %#llx as bo %u\n", surfaceID,
++	    (unsigned long long)size, (unsigned long long)base, slot + 1);
 +	out[0] = slot + 1;
 +	out[1] = base;
 +	out[2] = size;
@@ -344,8 +378,13 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
 +	}
 +	seq = vince_gpu_submit(addresses, words, nr_ibs);
 +	if (seq == 0) {
++		IOLog("VinceGPU: submit %u IBs failed\n", nr_ibs);
 +		ret = kIOReturnNotReady;
 +		goto out;
++	}
++	if (!fLoggedSubmit) {
++		fLoggedSubmit = true;
++		IOLog("VinceGPU: first submit %u IBs, %u BOs -> seq %u\n", nr_ibs, nr_bos, seq);
 +	}
 +	for (uint32_t i = 0; i < nr_bos; i++) {
 +		listed[i]->lastFence = seq;
@@ -375,7 +414,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  }
  
  IOReturn
-@@ -448,11 +765,129 @@
+@@ -448,11 +790,136 @@
  	IOReturn ret = kIOReturnSuccess;
  	uint64_t zero = 0, patience;
  
@@ -490,6 +529,13 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
 +			args->scalarOutput[3] = vince_gpu_parameter(4, &value) ? value : 450000000ull;
 +			args->scalarOutput[4] = 0;      /* no fence page: poll with selector 14 */
 +			args->scalarOutputCount = 5;
++			if (!fLoggedInfo) {
++				fLoggedInfo = true;
++				IOLog("VinceGPU: info chip %#llx gmem %llu max %llu\n",
++				    (unsigned long long)args->scalarOutput[0],
++				    (unsigned long long)args->scalarOutput[1],
++				    (unsigned long long)args->scalarOutput[3]);
++			}
 +			break;
 +		}
 +		case kSweetGemCpuPrep:

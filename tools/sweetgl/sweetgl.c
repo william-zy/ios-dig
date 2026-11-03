@@ -67,10 +67,8 @@ static driOptionCache opt_info, opts;
 void
 sweet_drm_log(const char *fmt, ...)
 {
-	static int fd = -1;
-	if (fd < 0) {
-		fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
-	}
+	/* DIG: stderr is teed into the kernel's persistent log (|backboardd|). */
+	int fd = STDERR_FILENO;
 	char line[512];
 	va_list ap;
 	va_start(ap, fmt);
@@ -92,7 +90,13 @@ sweetgl_init(void)
 	pthread_mutex_lock(&init_lock);
 	if (fscreen == NULL) {
 		int fd = sweet_drm_open();
-		if (fd >= 0) {
+		if (fd < 0) {
+			static int logged;
+			if (!logged) {
+				logged = 1;
+				sweet_drm_log("sweetgl: no VinceGPU connection");
+			}
+		} else {
 			/*
 			 * Render straight to memory, no GMEM tiles: tile restore/resolve
 			 * covers whole 32-row blocks past the end of IOSurfaces that were
@@ -297,6 +301,7 @@ void sweetgl_vibrant_fill_install(void);
 __attribute__((constructor)) static void
 sweetgl_load(void)
 {
+	sweet_drm_log("sweetgl: loaded in %s", getprogname());
 	if (strcmp(getprogname(), "SpringBoard") == 0) {
 		sweetgl_vibrant_fill_install();
 		const char *d = getenv("SWEETGL_LAYERDUMP");
@@ -306,8 +311,12 @@ sweetgl_load(void)
 		return;
 	}
 	sweetgl_eagl_install();
-	const char *t = getenv("SWEETGL_TEST");
-	if (t && t[0] == '1') {
+	/*
+	 * Bring-up: run the offscreen Mesa triangle once on every load.  The
+	 * only environment variable the DIG kernel can inject is
+	 * DYLD_INSERT_LIBRARIES, so SWEETGL_TEST is not available here.
+	 */
+	if (getenv("SWEETGL_NOSELFTEST") == NULL) {
 		pthread_t th;
 		pthread_create(&th, NULL, selftest_thread, NULL);
 		pthread_detach(th);
