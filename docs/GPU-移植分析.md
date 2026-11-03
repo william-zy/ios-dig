@@ -183,41 +183,42 @@ step 11: Adreno 506 command processor is up
   SHA256 `4effa0faf52145104cd0da08e6ae6875d32a8001f0bccbcabbc335886c6fd5f3`；
   CI run 41696601004，commit `bba499a`。
 - cmdline：`vincec0=1094 diggpu=1 adreno=11 digscm=1 adreno_pause=1000`。
-- **注意**：当前新内核（含 0192/新 0180 的任意组合）会让 backboardd 选择
-  1125x2436 渲染目标，屏幕黑（系统仍在跑，持久日志可读）。旧稳定镜像
-  `dig-boot-8core.img` 画面正常；GPU 调试用新内核 + TWRP 拉日志。
-- 下一步：用户态 GPU 接口（VinceGPU 的 DRM ioctl + freedreno/sweetgl 注入
-  backboardd），或先做最小 2D 合成让 UI 可见。
+- 该 probe11 镜像当时用的是 1125x2436 的错误 ADT，所以屏幕黑；内核 GPU 本身成功。
 
+## 9. 黑屏渲染路径的根因（2026-11-04 晚修正）
 
-## 9. 黑屏渲染路径的根因（2026-11-04）
+### 9.1 根因：打包用了错误的 ADT（已实测确认）
 
-### 9.1 隔离结果
+- 之前的“新内核触发 3x 路径”结论是误判。黑屏镜像与正常镜像的内核日志
+  CPU/时钟/FB 一致，真正的差异在 **boot.img 内嵌的 ADT**：
+  - `dig-boot-8core.img`（正常）：ADT = `artifacts/dig.adt`，
+    disp0 canvas **720x1280**（SHA256 `762d5fc6…`）。
+  - 所有黑屏镜像（probe11/exactstable-cmd/c0v3/c0off/native0）：
+    ADT = 旧的 `artifacts/dig-0xa.adt`，canvas **1125x2436**
+    （SHA256 `89859c37…`）。
+- backboardd 按 ADT canvas 建渲染目标：1125x2436；显示面 720x1280 需要
+  `AppleM2ScalerCSCDriver` 缩放，而本移植没有该驱动，于是不 swap、黑屏。
+- 把 `dig-0xa.adt` 换成 720x1280 后，**同一个含 0192 + 微码的内核** + 8 核 +
+  `diggpu=1 adreno=11` 正常进桌面；Adreno 505 step1-11 全过，`VinceGPU` 注册。
+  镜像：`artifacts/dig-boot-gpu-720.img`，SHA256 `afefb2db…`，
+  日志 `artifacts/log-gpu720.txt`。
 
-- 旧稳定镜像 `dig-boot-8core.img`（内核 = `d593ebf` 及之前）：backboardd 创建两个
-  **720x1280 keys=11** 显示面，UI 正常，日志无 `AppleM2ScalerCSCDriver` 失败。
-- 新内核（`d593ebf` + 仅 `0192`，GPU 初始化不执行、cmdline 与旧版完全相同）：
-  backboardd 额外创建 **1125x2436 keys=10** 渲染目标，并打印
-  `IOServiceMatchingfailed for: AppleM2ScalerCSCDriver`；显示面仍是 720x1280 且
-  有 swap，但内容是黑的。
-- 因此触发条件不是 c0 频率、不是 GPU 执行、不是 cmdline；是**内核二进制里多了
-  0192 的代码后，userspace 选择了 iPhone X 的 3x 离屏渲染路径**，而缩放器
-  `AppleM2ScalerCSCDriver` 在本移植里不存在，3x→720x1280 的合成/缩放无法完成。
-- 内核日志（CPU/时钟/FB）两者完全一致，`presented as 720x1280`；差异只在
-  backboardd 的渲染目标选择上，判定为内核布局/时序引发的 userspace 路径差异。
+### 9.2 防呆与当前状态
 
-### 9.2 参考做法（ios-sailfish）
+- `tools/ci-test.sh` 硬性检查 ADT canvas = 720x1280；
+  `tools/mkpayload_dig.py` 对错误 canvas 打印醒目警告；
+  `tools/mkadt_dig.py` 默认 XNU 窗口改回 0xa0000000/0x40000000。
+- 旧的 1125x2436 ADT 备份为 `artifacts/dig-0xa-1125.adt`，不要用于正常启动。
+- 内核侧 GPU 已完成（第 8 节）；显示与 GPU 现在可以共存。
+- 遗留：c0 四核在 0 MHz 在线（旧 0180 的 c0 mux 切换失败），Settings/About
+  出现过一次用户态等待；正在用 `vincenoc0=1`（新版 0180）做对照。
 
-- sailfish 让 iOS 看到 **iPhone 8 面板（750x1334 @2x）**，由 GPU（freedreno）把每帧
-  双线性缩放到 1080x1920 面板，双缓冲、最高 60 Hz；CoreAnimation 的 GL ES
-  渲染器经 `sweetgl.dylib`（EAGL shim）跑在 Mesa freedreno 上。
-- 因此正确解法不是继续调内核显示常量，而是补齐**用户态 GPU/显示层**：
-  `VinceGPU` 的 DRM ioctl → libdrm/msm 模拟 → sweetgl/EAGL → 双缓冲呈现与 GPU 缩放。
-  这同时解决 3x 黑屏并带来真正的 GPU 加速。
+### 9.3 下一步：用户态 GPU/显示
 
-### 9.3 当前状态
-
-- 内核侧 Adreno 505 已全流程点亮（见第 8 节，probe11 日志）。
-- 日常使用仍是旧稳定镜像 `dig-boot-8core.img`（4×1401，画面正常）。
-- 下一步：按 `repos/ios-sailfish/tools/sweetgl`、`tools/sweetgpu-ca` 移植用户态，
-  或在 DIG 上先实现最小 2D/双缓冲呈现以恢复画面。
+- `VinceGPU` 已加 SweetGPU 兼容的 scalar 接口（selector 10-16，patch 0193）：
+  BO 分配/导入、IB 提交、fence 等待、info、CPU 缓存维护；ABI 与
+  `repos/ios-sailfish/tools/sweetgl/sweet_drm.c` 一致。
+- 还需构建 Mesa freedreno + `sweetgl.dylib`（iOS arm64），注入 HFS 根镜像的
+  `/usr/lib/`，由 `sweetenv=backboardd:DYLD_INSERT_LIBRARIES=...` 加载。
+- 参考 sailfish 的 `mesa-setup.sh`、`mesa.patch`、`eagl.c`；目标是 CA 的 GLES
+  渲染器走 Mesa，GPU 双缓冲/缩放。

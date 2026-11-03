@@ -1,0 +1,46 @@
+name: sweetgl
+
+# Build tools/sweetgl/sweetgl.dylib for iOS 16 arm64: Mesa 26.2.4 freedreno
+# plus the libdrm/msm emulation and the EAGL shim for CoreAnimation.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "tools/sweetgl/**"
+      - ".github/workflows/sweetgl.yml"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          brew install meson ninja pkg-config
+          python3 -m pip install --user mako pyyaml packaging ||
+            python3 -m pip install --user --break-system-packages mako pyyaml packaging
+          python3 -c 'import mako; print("mako", mako.__version__)'
+          meson --version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Fetch Mesa
+        run: |
+          mkdir -p research
+          curl -fL --retry 3 -o mesa.tar.xz https://archive.mesa3d.org/mesa-26.2.4.tar.xz ||
+            curl -fL --retry 3 -o mesa.tar.xz \
+              https://gitlab.freedesktop.org/mesa/mesa/-/archive/mesa-26.2.4/mesa-mesa-26.2.4.tar.xz
+          mkdir research/mesa
+          tar -xf mesa.tar.xz -C research/mesa --strip-components=1
+          test -f research/mesa/meson.build
+
+      - name: Build sweetgl
+        run: bash tools/sweetgl/ci-build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweetgl
+          path: tools/sweetgl/out/sweetgl.dylib
+          if-no-files-found: error

@@ -1,0 +1,507 @@
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -17,6 +17,8 @@
+ #include <mach/vm_param.h>
+ #include <sys/systm.h>
+ 
++#include "SweetSurface.h"
++
+ extern "C" {
+ uint64_t kvtophys(vm_offset_t va);
+ bool vince_gpu_ready(void);
+@@ -26,9 +28,23 @@
+ uint32_t vince_gpu_last(void);
+ void VinceGPUStart(void);
+ void VinceGPUStop(void);
++void flush_dcache64(addr64_t addr, unsigned count, int phys);
+ }
+ 
+ enum {
++	/*
++	 * SweetGPU-compatible buffer objects for the Mesa/freedreno layer
++	 * (tools/sweetgl).  Scalar selectors; the msm requests above keep
++	 * their structure ABI for hakios-metal.
++	 */
++	kSweetGemNew            = 10,   /* size -> handle, GPU VA, user address */
++	kSweetGemClose          = 11,   /* handle */
++	kSweetGemImport         = 12,   /* IOSurface id -> handle, GPU VA, size */
++	kSweetGemSubmit         = 13,   /* IBs + handles -> sequence number */
++	kSweetGemWait           = 14,   /* sequence number, milliseconds */
++	kSweetGemInfo           = 15,   /* -> chip id, GMEM size/base, max Hz, 0 */
++	kSweetGemCpuPrep        = 16,   /* handle: wait + drop cached lines */
++
+ 	kDrmGemClose            = 0x09,
+ 	kMsmGetParam            = 0x40,
+ 	kMsmSetParam            = 0x41,
+@@ -102,6 +118,15 @@
+ 
+ #define GPU_BUFFERS 1024
+ #define GPU_BUFFER_MAX (256ull << 20)
++#define GPU_SUBMIT_IBS 64
++
++/* struct sweet_gpu_submit + ibs[] + u32 handles[]; layouts are ABI. */
++struct sweet_submit_header {
++	uint32_t nr_ibs, nr_bos;
++};
++struct sweet_submit_ib {
++	uint32_t address_lo, address_hi, size_words, pad;
++};
+ 
+ struct gpu_buffer {
+ 	IOBufferMemoryDescriptor *memory;
+@@ -109,6 +134,12 @@
+ 	uint64_t address;
+ 	uint64_t size;
+ 	uint32_t flags;
++	IOMemoryMap *umap;              /* kSweetGemNew: the client's mapping */
++	uint64_t *pa;                   /* physical pages, for cache maintenance */
++	uint32_t npages;
++	uint32_t lastFence;
++	bool used;
++	SweetSurface *surface;          /* kSweetGemImport */
+ };
+ 
+ static IOLock *gGPULock = NULL;
+@@ -215,6 +246,12 @@
+ 	IOReturn gemNew(struct msm_gem_new *request);
+ 	IOReturn gemInfo(struct msm_gem_info *request);
+ 	IOReturn submit(struct msm_gem_submit *request);
++	IOReturn sweetGemNew(uint64_t size, uint64_t *out);
++	IOReturn sweetGemImport(uint32_t surfaceID, uint64_t *out);
++	IOReturn sweetSubmit(const void *input, size_t length, uint64_t *sequence);
++	IOReturn sweetCpuPrep(uint32_t handle);
++	static bool contains(const struct gpu_buffer *b, uint64_t address, uint64_t bytes);
++	static void flushBuffer(const struct gpu_buffer *b);
+ 	void freeBuffer(struct gpu_buffer *b);
+ 
+ 	task_t fTask;
+@@ -248,10 +285,39 @@
+ VinceGPUUserClient::freeBuffer(struct gpu_buffer *b)
+ {
+ 	if (b->memory != NULL) {
++		if (b->surface != NULL) {
++			b->memory->complete();
++		}
+ 		b->memory->release();
+ 		b->memory = NULL;
+ 	}
++	OSSafeReleaseNULL(b->umap);
++	OSSafeReleaseNULL(b->surface);
++	if (b->pa != NULL) {
++		IOFreeData(b->pa, b->npages * sizeof(uint64_t));
++		b->pa = NULL;
++	}
+ 	bzero(b, sizeof(*b));
++}
++
++/* Is [address, address + bytes) inside this buffer's GPU range? */
++bool
++VinceGPUUserClient::contains(const struct gpu_buffer *b, uint64_t address, uint64_t bytes)
++{
++	if (b == NULL || bytes == 0 || address < b->address) {
++		return false;
++	}
++	uint64_t offset = address - b->address;
++	return offset <= b->size && bytes <= b->size - offset;
++}
++
++/* CPU writes to these pages must reach memory before the GPU reads them. */
++void
++VinceGPUUserClient::flushBuffer(const struct gpu_buffer *b)
++{
++	for (uint32_t p = 0; b->pa != NULL && p < b->npages; p++) {
++		flush_dcache64((addr64_t)b->pa[p], (unsigned)PAGE_SIZE, TRUE);
++	}
+ }
+ 
+ IOReturn
+@@ -407,6 +473,257 @@
+ 		IOFree(cmds, request->nr_cmds * sizeof(*cmds));
+ 	}
+ 	return ret;
++}
++
++/*
++ * A zeroed BO the client can write through a cached mapping.  The SMMU is in
++ * bypass, so the GPU VA is the physical address and the pages must be
++ * contiguous; freedreno asks for small buffers and retries smaller ones.
++ */
++IOReturn
++VinceGPUUserClient::sweetGemNew(uint64_t size, uint64_t *out)
++{
++	uint64_t rounded = round_page_64(size);
++	IOBufferMemoryDescriptor *memory;
++	IOMemoryMap *umap;
++	uint64_t *pa;
++	uint64_t base = 0;
++	uint32_t npages, slot = GPU_BUFFERS;
++	struct gpu_buffer *b = NULL;
++
++	if (rounded == 0 || rounded > GPU_BUFFER_MAX || fBuffers == NULL) {
++		return kIOReturnBadArgument;
++	}
++	memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++	    kIODirectionInOut | kIOMemoryKernelUserShared, (vm_size_t)rounded, PAGE_SIZE);
++	if (memory == NULL) {
++		return kIOReturnNoMemory;
++	}
++	bzero(memory->getBytesNoCopy(), (size_t)rounded);
++	npages = (uint32_t)(rounded / PAGE_SIZE);
++	pa = (uint64_t *)IOMallocData(npages * sizeof(uint64_t));
++	if (pa == NULL) {
++		memory->release();
++		return kIOReturnNoMemory;
++	}
++	for (uint32_t p = 0; p < npages; p++) {
++		IOByteCount segment = 0;
++		pa[p] = memory->getPhysicalSegment((IOByteCount)p * PAGE_SIZE, &segment, kIOMemoryMapperNone);
++		if (pa[p] == 0 || (pa[p] & PAGE_MASK) != 0 || segment < PAGE_SIZE ||
++		    (p != 0 && pa[p] != base + (uint64_t)p * PAGE_SIZE)) {
++			IOFreeData(pa, npages * sizeof(uint64_t));
++			memory->release();
++			return kIOReturnNoMemory;
++		}
++		base = pa[0];
++		flush_dcache64((addr64_t)pa[p], (unsigned)PAGE_SIZE, TRUE);
++	}
++	umap = memory->createMappingInTask(fTask, 0, kIOMapAnywhere);
++	if (umap == NULL) {
++		IOFreeData(pa, npages * sizeof(uint64_t));
++		memory->release();
++		return kIOReturnNoMemory;
++	}
++	IOLockLock(gGPULock);
++	for (uint32_t n = 0; n < GPU_BUFFERS; n++) {
++		uint32_t h = (fNextBuffer + n) % GPU_BUFFERS;
++		if (fBuffers[h].memory == NULL) {
++			slot = h;
++			fNextBuffer = h + 1;
++			break;
++		}
++	}
++	if (slot != GPU_BUFFERS) {
++		b = &fBuffers[slot];
++		bzero(b, sizeof(*b));
++		b->memory = memory;
++		b->kernel = (uint8_t *)memory->getBytesNoCopy();
++		b->address = base;
++		b->size = rounded;
++		b->umap = umap;
++		b->pa = pa;
++		b->npages = npages;
++	}
++	IOLockUnlock(gGPULock);
++	if (slot == GPU_BUFFERS) {
++		umap->release();
++		IOFreeData(pa, npages * sizeof(uint64_t));
++		memory->release();
++		return kIOReturnNoResources;
++	}
++	out[0] = slot + 1;
++	out[1] = base;
++	out[2] = umap->getAddress();
++	return kIOReturnSuccess;
++}
++
++/* An IOSurface's pages as a BO; eagl passes the CPU mapping on the side. */
++IOReturn
++VinceGPUUserClient::sweetGemImport(uint32_t surfaceID, uint64_t *out)
++{
++	SweetSurface *surface = sweet_surface_copy(surfaceID);
++	IOMemoryDescriptor *md;
++	uint64_t size, base = 0, *pa;
++	uint32_t npages, slot = GPU_BUFFERS;
++	struct gpu_buffer *b = NULL;
++
++	if (surface == NULL || surface->memory == NULL) {
++		OSSafeReleaseNULL(surface);
++		return kIOReturnNotFound;
++	}
++	md = surface->memory;
++	size = md->getLength();
++	if (size == 0 || (size & PAGE_MASK) != 0 || size > GPU_BUFFER_MAX) {
++		surface->release();
++		return kIOReturnBadArgument;
++	}
++	if (md->prepare(kIODirectionInOut) != kIOReturnSuccess) {
++		surface->release();
++		return kIOReturnVMError;
++	}
++	npages = (uint32_t)(size / PAGE_SIZE);
++	pa = (uint64_t *)IOMallocData(npages * sizeof(uint64_t));
++	if (pa == NULL) {
++		md->complete();
++		surface->release();
++		return kIOReturnNoMemory;
++	}
++	for (uint32_t p = 0; p < npages; p++) {
++		IOByteCount segment = 0;
++		pa[p] = md->getPhysicalSegment((IOByteCount)p * PAGE_SIZE, &segment, kIOMemoryMapperNone);
++		if (pa[p] == 0 || (pa[p] & PAGE_MASK) != 0 || segment < PAGE_SIZE ||
++		    (p != 0 && pa[p] != base + (uint64_t)p * PAGE_SIZE)) {
++			IOFreeData(pa, npages * sizeof(uint64_t));
++			md->complete();
++			surface->release();
++			return kIOReturnNoMemory;
++		}
++		base = pa[0];
++	}
++	md->retain();
++	IOLockLock(gGPULock);
++	for (uint32_t n = 0; n < GPU_BUFFERS; n++) {
++		uint32_t h = (fNextBuffer + n) % GPU_BUFFERS;
++		if (fBuffers[h].memory == NULL) {
++			slot = h;
++			fNextBuffer = h + 1;
++			break;
++		}
++	}
++	if (slot != GPU_BUFFERS) {
++		b = &fBuffers[slot];
++		bzero(b, sizeof(*b));
++		b->memory = md;
++		b->surface = surface;
++		b->address = base;
++		b->size = size;
++		b->pa = pa;
++		b->npages = npages;
++	}
++	IOLockUnlock(gGPULock);
++	if (slot == GPU_BUFFERS) {
++		md->release();
++		IOFreeData(pa, npages * sizeof(uint64_t));
++		md->complete();
++		surface->release();
++		return kIOReturnNoResources;
++	}
++	out[0] = slot + 1;
++	out[1] = base;
++	out[2] = size;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++VinceGPUUserClient::sweetSubmit(const void *input, size_t length, uint64_t *sequence)
++{
++	const struct sweet_submit_header *header = (const struct sweet_submit_header *)input;
++	const struct sweet_submit_ib *ibs;
++	const uint32_t *handles;
++	struct gpu_buffer **listed;
++	uint64_t addresses[GPU_SUBMIT_IBS];
++	uint32_t words[GPU_SUBMIT_IBS];
++	uint32_t nr_ibs, nr_bos, seq;
++	size_t need;
++
++	if (length < sizeof(*header)) {
++		return kIOReturnBadArgument;
++	}
++	nr_ibs = header->nr_ibs;
++	nr_bos = header->nr_bos;
++	if (nr_ibs == 0 || nr_ibs > GPU_SUBMIT_IBS || nr_bos == 0 || nr_bos > GPU_BUFFERS) {
++		return kIOReturnBadArgument;
++	}
++	need = sizeof(*header) + (size_t)nr_ibs * sizeof(struct sweet_submit_ib) +
++	    (size_t)nr_bos * sizeof(uint32_t);
++	if (length != need) {
++		return kIOReturnBadArgument;
++	}
++	ibs = (const struct sweet_submit_ib *)((const char *)input + sizeof(*header));
++	handles = (const uint32_t *)(ibs + nr_ibs);
++	listed = (struct gpu_buffer **)IOMallocData(nr_bos * sizeof(*listed));
++	if (listed == NULL) {
++		return kIOReturnNoMemory;
++	}
++	IOReturn ret = kIOReturnSuccess;
++	for (uint32_t i = 0; i < nr_bos; i++) {
++		listed[i] = buffer(handles[i]);
++		if (listed[i] == NULL) {
++			ret = kIOReturnBadArgument;
++			goto out;
++		}
++		/* CPU writes must be in memory before the GPU reads the buffers. */
++		flushBuffer(listed[i]);
++	}
++	for (uint32_t i = 0; i < nr_ibs; i++) {
++		uint64_t address = (uint64_t)ibs[i].address_lo | ((uint64_t)ibs[i].address_hi << 32);
++		uint32_t count = ibs[i].size_words;
++		bool owned = false;
++
++		if (count == 0 || (address & 3) || count > GPU_BUFFER_MAX / 4) {
++			ret = kIOReturnBadArgument;
++			goto out;
++		}
++		for (uint32_t j = 0; j < nr_bos && !owned; j++) {
++			owned = contains(listed[j], address, (uint64_t)count * 4);
++		}
++		if (!owned) {
++			ret = kIOReturnNotPermitted;
++			goto out;
++		}
++		addresses[i] = address;
++		words[i] = count;
++	}
++	seq = vince_gpu_submit(addresses, words, nr_ibs);
++	if (seq == 0) {
++		ret = kIOReturnNotReady;
++		goto out;
++	}
++	for (uint32_t i = 0; i < nr_bos; i++) {
++		listed[i]->lastFence = seq;
++		listed[i]->used = true;
++	}
++	*sequence = seq;
++
++out:
++	IOFreeData(listed, nr_bos * sizeof(*listed));
++	return ret;
++}
++
++/* After a fence: drop this CPU's cached lines so it sees the GPU's writes. */
++IOReturn
++VinceGPUUserClient::sweetCpuPrep(uint32_t handle)
++{
++	struct gpu_buffer *b = buffer(handle);
++
++	if (b == NULL) {
++		return kIOReturnNotFound;
++	}
++	if (b->used && !vince_gpu_done(b->lastFence)) {
++		return kIOReturnBusy;
++	}
++	flushBuffer(b);
++	return kIOReturnSuccess;
+ }
+ 
+ IOReturn
+@@ -448,11 +765,129 @@
+ 	IOReturn ret = kIOReturnSuccess;
+ 	uint64_t zero = 0, patience;
+ 
+-	if (args->structureInput == NULL || size > sizeof(r) || fBuffers == NULL) {
++	if (fBuffers == NULL) {
+ 		return kIOReturnBadArgument;
+ 	}
+ 	if (!vince_gpu_ready()) {
+ 		return kIOReturnNotReady;
++	}
++
++	/*
++	 * Scalar selectors used by tools/sweetgl's libdrm emulation.  Wait is
++	 * handled without the client lock: other threads submit while it waits.
++	 */
++	if (selector == kSweetGemWait) {
++		if (args->scalarInputCount < 2) {
++			return kIOReturnBadArgument;
++		}
++		patience = args->scalarInput[1] > 60000 ? 60000 : args->scalarInput[1];
++		return gpuWait((uint32_t)args->scalarInput[0], (int64_t)patience) ?
++		    kIOReturnSuccess : kIOReturnTimeout;
++	}
++	if (selector >= kSweetGemNew && selector <= kSweetGemCpuPrep) {
++		UInt32 outCount = args->scalarOutputCount;
++
++		IOLockLock(gGPULock);
++		switch (selector) {
++		case kSweetGemNew:
++			if (args->scalarInputCount >= 1 && outCount >= 3) {
++				ret = sweetGemNew(args->scalarInput[0], args->scalarOutput);
++				args->scalarOutputCount = ret == kIOReturnSuccess ? 3 : 0;
++			} else {
++				ret = kIOReturnBadArgument;
++			}
++			break;
++		case kSweetGemClose:
++			if (args->scalarInputCount != 1) {
++				ret = kIOReturnBadArgument;
++				break;
++			}
++			b = buffer((uint32_t)args->scalarInput[0]);
++			if (b == NULL) {
++				ret = kIOReturnNotFound;
++			} else if (b->used && !gpuWait(b->lastFence, 2000)) {
++				/* The GPU may still read it: leave the BO wired rather than free under it. */
++				IOLog("VinceGPU: bo %u busy at close, leaked\n", (uint32_t)args->scalarInput[0]);
++				ret = kIOReturnBusy;
++			} else {
++				freeBuffer(b);
++			}
++			break;
++		case kSweetGemImport:
++			if (args->scalarInputCount >= 1 && outCount >= 3) {
++				ret = sweetGemImport((uint32_t)args->scalarInput[0], args->scalarOutput);
++				args->scalarOutputCount = ret == kIOReturnSuccess ? 3 : 0;
++			} else {
++				ret = kIOReturnBadArgument;
++			}
++			break;
++		case kSweetGemSubmit: {
++			IOMemoryDescriptor *d = args->structureInputDescriptor;
++			const void *input = args->structureInput;
++			size_t length = args->structureInputSize;
++			void *buf = NULL;
++
++			if (outCount < 1) {
++				ret = kIOReturnBadArgument;
++				break;
++			}
++			if (d != NULL) {
++				length = d->getLength();
++				buf = length <= (1u << 20) ? IOMallocData(length) : NULL;
++				if (buf == NULL) {
++					ret = kIOReturnNoMemory;
++					break;
++				}
++				ret = d->prepare() == kIOReturnSuccess ? kIOReturnSuccess : kIOReturnVMError;
++				if (ret == kIOReturnSuccess) {
++					ret = d->readBytes(0, buf, length) == length ?
++					    kIOReturnSuccess : kIOReturnVMError;
++					d->complete();
++				}
++				if (ret == kIOReturnSuccess) {
++					input = buf;
++				}
++			}
++			if (ret == kIOReturnSuccess && input != NULL) {
++				uint64_t sequence = 0;
++				ret = sweetSubmit(input, length, &sequence);
++				if (ret == kIOReturnSuccess) {
++					args->scalarOutput[0] = sequence;
++					args->scalarOutputCount = 1;
++				} else {
++					args->scalarOutputCount = 0;
++				}
++			}
++			if (buf != NULL) {
++				IOFreeData(buf, length);
++			}
++			break;
++		}
++		case kSweetGemInfo: {
++			uint64_t value;
++			if (outCount < 5) {
++				ret = kIOReturnBadArgument;
++				break;
++			}
++			args->scalarOutput[0] = vince_gpu_parameter(3, &value) ? value : 0x05000500ull;
++			args->scalarOutput[1] = vince_gpu_parameter(2, &value) ? value : 136 * 1024;
++			args->scalarOutput[2] = vince_gpu_parameter(6, &value) ? value : 0x100000;
++			args->scalarOutput[3] = vince_gpu_parameter(4, &value) ? value : 450000000ull;
++			args->scalarOutput[4] = 0;      /* no fence page: poll with selector 14 */
++			args->scalarOutputCount = 5;
++			break;
++		}
++		case kSweetGemCpuPrep:
++			ret = args->scalarInputCount == 1 ?
++			    sweetCpuPrep((uint32_t)args->scalarInput[0]) : kIOReturnBadArgument;
++			break;
++		}
++		IOLockUnlock(gGPULock);
++		return ret;
++	}
++
++	if (args->structureInput == NULL || size > sizeof(r)) {
++		return kIOReturnBadArgument;
+ 	}
+ 
+ 	bzero(&r, sizeof(r));
