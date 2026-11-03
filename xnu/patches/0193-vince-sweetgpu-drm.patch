@@ -34,7 +34,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  	kDrmGemClose            = 0x09,
  	kMsmGetParam            = 0x40,
  	kMsmSetParam            = 0x41,
-@@ -102,6 +118,15 @@
+@@ -102,13 +118,28 @@
  
  #define GPU_BUFFERS 1024
  #define GPU_BUFFER_MAX (256ull << 20)
@@ -49,8 +49,9 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
 +};
  
  struct gpu_buffer {
- 	IOBufferMemoryDescriptor *memory;
-@@ -109,6 +134,12 @@
+-	IOBufferMemoryDescriptor *memory;
++	IOMemoryDescriptor *memory;     /* own BO or an imported surface's pixels */
+ 	uint8_t *kernel;
  	uint64_t address;
  	uint64_t size;
  	uint32_t flags;
