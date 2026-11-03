@@ -45,7 +45,24 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  	return true;
  }
  
-@@ -494,13 +504,19 @@
+@@ -387,6 +397,16 @@
+ 	printf("adreno: step 4: OXILI_GX_GDSC on (%#x), PWRSWITCH_CTRL=%#x, PWRSWITCH_STATUS=%#x\n",
+ 	    val, pwr_ctl, pwr_stat);
+ 
++	if (dig_mode && !(pwr_ctl & 0x80000000u)) {
++		/* DIG LK leaves the GFX LDO off; vince ships 0x80000038 here. */
++		printf("adreno: step 4: DIG gfx LDO off (CTRL=%#x STATUS=%#x), enabling\n", pwr_ctl, pwr_stat);
++		reg_write(gcc_va, GCC_GFX_PWRSWITCH_CTRL, 0x80000038u);
++		delay(100);
++		pwr_ctl = reg_read(gcc_va, GCC_GFX_PWRSWITCH_CTRL);
++		pwr_stat = reg_read(gcc_va, GCC_GFX_PWRSWITCH_STATUS);
++		printf("adreno: step 4: DIG gfx LDO after CTRL=%#x STATUS=%#x\n", pwr_ctl, pwr_stat);
++	}
++
+ 	delay(50);
+ 	return true;
+ }
+@@ -494,13 +514,19 @@
  	printf("adreno: step 6: probing Adreno 506 hardware registers (GFX_CBCR=%#x, CLK_OFF=%u)\n",
  	    gfx_cbcr, (gfx_cbcr >> 31) & 1u);
  
@@ -72,7 +89,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  	}
  
  	if (!gpu_va) {
-@@ -512,10 +528,15 @@
+@@ -512,10 +538,15 @@
  	}
  
  	/* read-only probe; the setup writes are step 7, and SECVID_TRUST_CNTL is left to the zap (step 10) */
@@ -88,7 +105,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  	vbif_ver = reg_read(gpu_va, REG_A5XX_VBIF_VERSION);
  
  	printf("adreno: step 6: RBBM_AHB_CNTL0=%#x RBBM_STATUS=%#x STATUS3=%#x INT0=%#x VBIF_VER=%#x\n",
-@@ -767,6 +788,14 @@
+@@ -767,6 +798,14 @@
  static bool
  step10_zap(void)
  {
@@ -103,7 +120,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  	uint64_t ans = 0;
  	int32_t ret;
  
-@@ -869,16 +898,16 @@
+@@ -869,16 +908,16 @@
  {
  	switch (which) {
  	case 0x01: /* MSM_PARAM_GPU_ID */
@@ -123,7 +140,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  		return true;
  	case 0x05: /* MSM_PARAM_TIMESTAMP */
  		*value = mach_absolute_time();
-@@ -1013,10 +1042,12 @@
+@@ -1013,10 +1052,12 @@
  	}
  	PE_parse_boot_argn("adreno_skip", &skip_steps, sizeof(skip_steps));
  	PE_parse_boot_argn("adreno_pause", &pause_ms, sizeof(pause_ms));
