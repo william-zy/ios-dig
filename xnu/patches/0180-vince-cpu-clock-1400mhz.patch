@@ -2,7 +2,7 @@ diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 index bbaec29..ea033f3 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -81,29 +81,383 @@ static uint32_t gVinceMHz[8];
+@@ -81,29 +81,385 @@ static uint32_t gVinceMHz[8];
   * put on CPUs 4-7 ran 40 times slower. Both clusters share VDD_APC, which already carries cluster 0 at 800 MHz:
   * give cluster 1 the same source. The A53 PLL (for more than 800 MHz) stays off; that needs CPR voltage control.
   */
@@ -233,6 +233,7 @@ index bbaec29..ea033f3 100644
 +	uint32_t cmd0, cfg0, cbcr0, cmd1, cfg1, cmd2, cfg2;
 +};
 +static struct vince_c0_diag vince_c0_diag;
++static uint32_t vince_noc0;   /* vincenoc0=1: leave cluster 0 stopped */
 +
 +/*
 + * The C0 RCG update does not complete while cluster 0 is power-collapsed,
@@ -316,6 +317,7 @@ index bbaec29..ea033f3 100644
 +	PE_parse_boot_argn("vincecpr", &cpr_off, sizeof(cpr_off));
 +	PE_parse_boot_argn("vincedump", &dump, sizeof(dump));
 +	PE_parse_boot_argn("vincec0", &vincec0, sizeof(vincec0));
++	PE_parse_boot_argn("vincenoc0", &vince_noc0, sizeof(vince_noc0));
 +	IOLog("VINCE CLK: boot args mhz %u volt %u cpr %u dump %u c0 %u\n", target_mhz, volt_mv, cpr_off, dump, vincec0);
 +
 +	if (!pll0 || !pll1 || !cpr || !spm || !cci_spm) {
@@ -397,7 +399,7 @@ index bbaec29..ea033f3 100644
  }
  static uint32_t gVinceBootRegistered;   /* the boot CPU finished processor_start */
  static uint32_t gVinceStarted;
-@@ -214,7 +568,7 @@ SweetCPU::start(IOService *provider)
+@@ -214,7 +570,7 @@ SweetCPU::start(IOService *provider)
  
  #if defined(VINCE)
  	if (boot) {
@@ -406,7 +408,20 @@ index bbaec29..ea033f3 100644
  		vm_offset_t marks = ml_io_map(0x913F0000, 0x1000);
  		if (marks) {
  			for (int i = 0; i < 8; i++) {
-@@ -284,5 +638,12 @@ SweetCPU::finishStart(const ml_topology_info_t *topology)
+@@ -250,6 +606,11 @@ SweetCPU::start(IOService *provider)
+ 	/*
+ 	 * Boot CPU: re-enter through cpu_machine_init -> PE_cpu_machine_init. Secondary: cpu_start -> startCPU
+ 	 * (PSCI CPU_ON); the CPU then runs initCPU(true) itself.
+ 	 */
+-	result = processor_start(machProcessor);
++	if (!boot && vince_noc0 && (fPhysId & 0x100u) == 0) {
++		IOLog("SWEET CPU: cpu %u held back by vincenoc0\n", cpu->cpu_id);
++		result = KERN_SUCCESS;
++	} else {
++		result = processor_start(machProcessor);
++	}
+ #if defined(VINCE)
+@@ -284,5 +645,12 @@ SweetCPU::finishStart(const ml_topology_info_t *topology)
  	ml_set_max_cpus(topology->max_cpu_id + 1);
  	IOLog("SWEET CPU: %u CPUs, initialization complete; MHz %u %u %u %u %u %u %u %u\n", topology->num_cpus,
  	    gVinceMHz[0], gVinceMHz[1], gVinceMHz[2], gVinceMHz[3], gVinceMHz[4], gVinceMHz[5], gVinceMHz[6],
@@ -419,7 +434,7 @@ index bbaec29..ea033f3 100644
 +		    vince_c0_diag.cmd2, vince_c0_diag.cfg2);
 +	}
  }
-@@ -305,5 +666,8 @@ SweetCPU::initCPU(bool boot)
+@@ -305,5 +673,8 @@ SweetCPU::initCPU(bool boot)
  #if defined(VINCE)
  	vince_smp_mark(0x31);
 +	if (!fBoot && (fPhysId & 0x100u) == 0) {
