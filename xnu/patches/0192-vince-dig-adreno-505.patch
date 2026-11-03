@@ -14,15 +14,16 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  
  /* GCC Registers */
  #define GCC_GFX3D_CMD_RCGR      0x59000u
-@@ -200,6 +206,7 @@
+@@ -200,6 +206,8 @@
  static uint32_t last_step = 0;
  static uint32_t skip_steps = 0;
  static uint32_t pause_ms = 0;
 +static uint32_t dig_mode = 0;   /* boot arg diggpu=1: Adreno 505 on MSM8940 */
++static uint32_t dig_scm = 1;    /* diggpu: call TZ restore_sec_cfg unless digscm=0 */
  static vm_offset_t gcc_va = 0;
  static vm_offset_t qfprom_va = 0;
  static vm_offset_t gpu_va = 0;
-@@ -307,15 +314,17 @@
+@@ -307,15 +315,17 @@
  
  	printf("adreno: step 2: reading QFPROM speed bin fuses\n");
  	if (!qfprom_va) {
@@ -44,7 +45,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  	return true;
  }
  
-@@ -494,13 +503,19 @@
+@@ -494,13 +504,19 @@
  	printf("adreno: step 6: probing Adreno 506 hardware registers (GFX_CBCR=%#x, CLK_OFF=%u)\n",
  	    gfx_cbcr, (gfx_cbcr >> 31) & 1u);
  
@@ -57,7 +58,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
 -		return false;
 +	/* TZ must restore the GPU's secure configuration after CX comes up, or the first access aborts.
 +	 * The a505 has no content protection: the vendor driver never makes this call. */
-+	if (dig_mode) {
++	if (dig_mode && !dig_scm) {
 +		printf("adreno: step 6: a505 has no content protection, skipping restore_sec_cfg\n");
 +		sret = 0;
 +	} else {
@@ -71,7 +72,23 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  	}
  
  	if (!gpu_va) {
-@@ -767,6 +782,14 @@
+@@ -512,10 +528,15 @@
+ 	}
+ 
+ 	/* read-only probe; the setup writes are step 7, and SECVID_TRUST_CNTL is left to the zap (step 10) */
++	printf("adreno: step 6: reading RBBM_AHB_CNTL0\n");
+ 	ahb_cntl = reg_read(gpu_va, REG_A5XX_RBBM_AHB_CNTL0);
++	printf("adreno: step 6: reading RBBM_STATUS\n");
+ 	status   = reg_read(gpu_va, REG_A5XX_RBBM_STATUS);
++	printf("adreno: step 6: reading RBBM_STATUS3\n");
+ 	status3  = reg_read(gpu_va, REG_A5XX_RBBM_STATUS3);
++	printf("adreno: step 6: reading RBBM_INT_0_STATUS\n");
+ 	int0     = reg_read(gpu_va, REG_A5XX_RBBM_INT_0_STATUS);
++	printf("adreno: step 6: reading VBIF_VERSION\n");
+ 	vbif_ver = reg_read(gpu_va, REG_A5XX_VBIF_VERSION);
+ 
+ 	printf("adreno: step 6: RBBM_AHB_CNTL0=%#x RBBM_STATUS=%#x STATUS3=%#x INT0=%#x VBIF_VER=%#x\n",
+@@ -767,6 +788,14 @@
  static bool
  step10_zap(void)
  {
@@ -86,7 +103,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  	uint64_t ans = 0;
  	int32_t ret;
  
-@@ -869,16 +892,16 @@
+@@ -869,16 +898,16 @@
  {
  	switch (which) {
  	case 0x01: /* MSM_PARAM_GPU_ID */
@@ -106,11 +123,12 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  		return true;
  	case 0x05: /* MSM_PARAM_TIMESTAMP */
  		*value = mach_absolute_time();
-@@ -1013,10 +1036,11 @@
+@@ -1013,10 +1042,12 @@
  	}
  	PE_parse_boot_argn("adreno_skip", &skip_steps, sizeof(skip_steps));
  	PE_parse_boot_argn("adreno_pause", &pause_ms, sizeof(pause_ms));
 +	PE_parse_boot_argn("diggpu", &dig_mode, sizeof(dig_mode));
++	PE_parse_boot_argn("digscm", &dig_scm, sizeof(dig_scm));
  
  	printf("==================================================\n");
 -	printf("VINCE ADRENO 506: starting steps 1 to %u (skip mask %#x, pause %u ms)\n",
