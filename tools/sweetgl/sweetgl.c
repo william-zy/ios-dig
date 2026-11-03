@@ -262,6 +262,8 @@ sweetgl_selftest(void)
 	bool ok = fbs == GL_FRAMEBUFFER_COMPLETE && linked && err == GL_NO_ERROR &&
 	    a[0] == 255 && a[1] == 0 && a[2] == 0 && a[3] == 255 &&
 	    b[0] == 0 && b[1] == 0 && b[2] == 255 && b[3] == 255;
+	/* Short line first: the /dev/null tee truncates one write to 256 bytes. */
+	sweet_drm_log("sweetgl: SELFTEST %s", ok ? "OK: Mesa GLES on the Adreno" : "FAILED");
 	sweet_drm_log("sweetgl: selftest fbo %x linked %d err %x px(32,32) %02x%02x%02x%02x px(224,224) %02x%02x%02x%02x "
 	    "context %.1f ms draw+readback %.2f ms -> %s",
 	    fbs, linked, err, a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], t_ctx, t_draw,
