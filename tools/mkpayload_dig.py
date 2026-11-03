@@ -127,6 +127,19 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
+def adt_canvas(adt_blob):
+    root, _ = adt.parse(adt_blob)
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        width = node.prop('canvas-width')
+        if width is not None:
+            height = node.prop('canvas-height')
+            return (struct.unpack('<I', width)[0], struct.unpack('<I', height)[0])
+        stack.extend(getattr(node, 'children', []))
+    return None
+
+
 def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
@@ -141,6 +154,11 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
 
     adt_blob = open(adt_path, 'rb').read()
     phys_base, mem_size = adt_dram(adt_blob)
+    canvas = adt_canvas(adt_blob)
+    if canvas is not None and canvas != (720, 1280):
+        print(f"[!] WARNING: ADT canvas is {canvas[0]}x{canvas[1]}, the DIG panel is 720x1280.")
+        print(f"[!] backboardd will pick a {canvas[0]}x{canvas[1]} render target and the screen")
+        print("[!] will stay black without a scaler. Use artifacts/dig-0xa.adt for normal builds.")
     pieces = [(s['vmaddr'], s['vmsize'], buf[s['fileoff']:s['fileoff'] + s['filesize']]) for s in segs]
     ramdisk = None
 

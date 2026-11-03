@@ -24,11 +24,13 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TOOLS_DIR)
 import adt  # noqa: E402
 
-# DIG-AL00 (MSM8940) hardware definitions
-PHYS_BASE = 0x20000000          # RAM bank 1: 0x20000000-0x7fffffff, no carveouts
-MEM_SIZE = 0x60000000           # 1.5 GiB
+# DIG-AL00 (MSM8940) hardware definitions.  XNU runs in RAM bank 2 at 0xa0000000:
+# the vince kernel's PLKSEG assumption, and the only range that survived the
+# HANDOVER tests (0x20000000 hangs).  dram-size becomes 0x3ff00000.
+PHYS_BASE = 0xa0000000
+MEM_SIZE = 0x40000000           # 1 GiB window at 0xa0000000
 
-PANIC_LOG_SIZE = 0x100000       # 1 MiB panic log at the top of bank 1
+PANIC_LOG_SIZE = 0x100000       # 1 MiB panic log at the top of the window
 
 # MPIDR of the CPU LK hands control to (cluster 1 core 0, measured on device)
 BOOT_CPU_MPIDR = 0x100

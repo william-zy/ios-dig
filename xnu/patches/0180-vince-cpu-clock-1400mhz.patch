@@ -2,7 +2,7 @@ diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 index bbaec29..ea033f3 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
 +++ b/iokit/Kernel/arm/SweetCPU.cpp
-@@ -81,29 +81,255 @@ static uint32_t gVinceMHz[8];
+@@ -81,29 +81,385 @@ static uint32_t gVinceMHz[8];
   * put on CPUs 4-7 ran 40 times slower. Both clusters share VDD_APC, which already carries cluster 0 at 800 MHz:
   * give cluster 1 the same source. The A53 PLL (for more than 800 MHz) stays off; that needs CPR voltage control.
   */
@@ -40,7 +40,7 @@ index bbaec29..ea033f3 100644
 +}
 +
 +static bool
-+vince_rcg_switch(vm_offset_t base, uint32_t val)
++vince_rcg_switch_q(vm_offset_t base, uint32_t val)
 +{
 +	volatile uint32_t *cmd = (volatile uint32_t *)(base + 0x50);
 +	volatile uint32_t *cfg = (volatile uint32_t *)(base + 0x54);
@@ -56,7 +56,17 @@ index bbaec29..ea033f3 100644
 +		}
 +		IODelay(1);
 +	}
-+	IOLog("VINCE CLK: rcg %#lx update stuck, cmd %#x cfg %#x\n", (unsigned long)base, *cmd, *cfg);
++	return false;
++}
++
++static bool
++vince_rcg_switch(vm_offset_t base, uint32_t val)
++{
++	if (vince_rcg_switch_q(base, val)) {
++		return true;
++	}
++	IOLog("VINCE CLK: rcg %#lx update stuck, cmd %#x cfg %#x\n", (unsigned long)base,
++	    *(volatile uint32_t *)(base + 0x50), *(volatile uint32_t *)(base + 0x54));
 +	return false;
 +}
 +
@@ -105,6 +115,52 @@ index bbaec29..ea033f3 100644
 +	__builtin_arm_dsb(DSB_SY);
 +	IOLog("VINCE CLK: pll %#lx locked, L=%u, mode %#x user %#x sts %#x\n",
 +	    (unsigned long)pll, l_val, mode, user, sts);
++	return true;
++}
++
++/*
++ * Vendor early-init recipe for the C0 PLL (clock-cpu-8939.c,
++ * configure_enable_sr2_pll).  LK never configures the C0 PLL on this
++ * board, and vince_pll_set leaves USER_CTL/CONFIG_CTL at their reset
++ * values; Android writes USER_CTL 0x0100000f and CONFIG_CTL 0x4c015765
++ * once and only changes L afterwards (variable_rate_pll_set_rate).
++ */
++static bool
++vince_pll0_config(vm_offset_t pll, uint32_t l_val)
++{
++	uint32_t sts = 0;
++	int i;
++
++	*(volatile uint32_t *)(pll + 0x00) = 0;             /* MODE: off */
++	__builtin_arm_dsb(DSB_SY);
++	*(volatile uint32_t *)(pll + 0x04) = l_val;
++	*(volatile uint32_t *)(pll + 0x08) = 0;             /* M */
++	*(volatile uint32_t *)(pll + 0x0C) = 1;             /* N */
++	*(volatile uint32_t *)(pll + 0x10) = 0x0100000fu;   /* USER_CTL */
++	*(volatile uint32_t *)(pll + 0x14) = 0x4c015765u;   /* CONFIG_CTL */
++	__builtin_arm_dsb(DSB_SY);
++	*(volatile uint32_t *)(pll + 0x00) = 0x2;           /* PLL_BYPASSNL */
++	__builtin_arm_dsb(DSB_SY);
++	IODelay(2);
++	*(volatile uint32_t *)(pll + 0x00) = 0x6;           /* PLL_RESET_N */
++	__builtin_arm_dsb(DSB_SY);
++	for (i = 0; i < 200; i++) {
++		sts = *(volatile uint32_t *)(pll + 0x1C);
++		if (sts & (1u << 16)) {
++			break;
++		}
++		IODelay(1);
++	}
++	if (!(sts & (1u << 16))) {
++		IOLog("VINCE CLK: c0 pll did not lock, mode %#x sts %#x\n",
++		    *(volatile uint32_t *)(pll + 0x00), sts);
++		return false;
++	}
++	*(volatile uint32_t *)(pll + 0x00) = 0x7;           /* PLL_OUTCTRL */
++	__builtin_arm_dsb(DSB_SY);
++	IODelay(50);
++	IOLog("VINCE CLK: c0 pll locked, L=%u, user %#x cfg %#x sts %#x\n", l_val,
++	    *(volatile uint32_t *)(pll + 0x10), *(volatile uint32_t *)(pll + 0x14), sts);
 +	return true;
 +}
 +
@@ -163,6 +219,77 @@ index bbaec29..ea033f3 100644
 +	    ok ? "set" : "not confirmed");
 +	return ok;
 +}
++static vm_offset_t vince_c0_base;
++static uint32_t vince_c0_ready;
++static uint32_t vince_c0_mhz;
++
++/*
++ * The kick runs with interrupts disabled (initCPU), where IOLog panics
++ * with "Console I/O from interrupt-disabled context".  Record the steps
++ * here and let finishStart print them from a normal thread.
++ */
++struct vince_c0_diag {
++	uint32_t ran, cpu, step, failed;
++	uint32_t cmd0, cfg0, cbcr0, cmd1, cfg1, cmd2, cfg2;
++};
++static struct vince_c0_diag vince_c0_diag;
++static uint32_t vince_noc0;   /* vincenoc0=1: leave cluster 0 stopped */
++
++/*
++ * The C0 RCG update does not complete while cluster 0 is power-collapsed,
++ * so the boot CPU only configures the C0 PLL.  The first cluster-0 CPU to
++ * run initCPU walks the mux the way the vendor early-init code does: on to
++ * GPLL0/2 (a known-good 400 MHz) and then on to the A53 PLL.
++ */
++static void
++vince_c0_kick(unsigned cpu)
++{
++	volatile uint32_t *cmd, *cfg, *cbcr;
++	uint32_t cbcr_val;
++
++	if (!vince_c0_ready || !vince_c0_base) {
++		return;
++	}
++	if (!__sync_bool_compare_and_swap(&vince_c0_ready, 1u, 0u)) {
++		return;
++	}
++	cmd = (volatile uint32_t *)(vince_c0_base + 0x50);
++	cfg = (volatile uint32_t *)(vince_c0_base + 0x54);
++	cbcr = (volatile uint32_t *)(vince_c0_base + 0x58);  /* APCS_ALIAS0_CORE_CBCR */
++	cbcr_val = *cbcr;
++	vince_c0_diag.ran = 1;
++	vince_c0_diag.cpu = cpu;
++	vince_c0_diag.cmd0 = *cmd;
++	vince_c0_diag.cfg0 = *cfg;
++	vince_c0_diag.cbcr0 = cbcr_val;
++	if (*cmd & 1u) {
++		vince_c0_diag.step = 1;
++		vince_c0_diag.failed = 1;
++		return;
++	}
++	if (!(cbcr_val & 1u)) {
++		*cbcr = cbcr_val | 1u;
++		__builtin_arm_dsb(DSB_SY);
++	}
++	vince_c0_diag.step = 2;
++	if (!vince_rcg_switch_q(vince_c0_base, 0x403u)) {
++		vince_c0_diag.failed = 1;
++		return;
++	}
++	vince_c0_diag.cmd1 = *cmd;
++	vince_c0_diag.cfg1 = *cfg;
++	vince_c0_diag.step = 3;
++	for (int i = 0; i < 2000; i++) {
++		IODelay(1);
++	}
++	if (!vince_rcg_switch_q(vince_c0_base, 0x501u)) {
++		vince_c0_diag.failed = 1;
++		return;
++	}
++	vince_c0_diag.cmd2 = *cmd;
++	vince_c0_diag.cfg2 = *cfg;
++	vince_c0_diag.step = 4;
++}
  static void
 -vince_cluster1_clock(void)
 +vince_cpu_clock_init(void)
@@ -190,6 +317,7 @@ index bbaec29..ea033f3 100644
 +	PE_parse_boot_argn("vincecpr", &cpr_off, sizeof(cpr_off));
 +	PE_parse_boot_argn("vincedump", &dump, sizeof(dump));
 +	PE_parse_boot_argn("vincec0", &vincec0, sizeof(vincec0));
++	PE_parse_boot_argn("vincenoc0", &vince_noc0, sizeof(vince_noc0));
 +	IOLog("VINCE CLK: boot args mhz %u volt %u cpr %u dump %u c0 %u\n", target_mhz, volt_mv, cpr_off, dump, vincec0);
 +
 +	if (!pll0 || !pll1 || !cpr || !spm || !cci_spm) {
@@ -261,15 +389,17 @@ index bbaec29..ea033f3 100644
 +	}
 +	if (vincec0 > 800) {
 +		uint32_t l0 = (vincec0 * 1000u + 9600u) / 19200u;
-+		if (vince_pll_set(pll0, l0)) {
-+			(void)vince_rcg_switch(c0, 0x501u);
-+			IOLog("VINCE CLK: c0 now on its A53 PLL, %u MHz (L=%u)\n", vincec0, l0);
++		if (vince_pll0_config(pll0, l0)) {
++			vince_c0_base = c0;
++			vince_c0_mhz = vincec0;
++			vince_c0_ready = 1;
++			IOLog("VINCE CLK: c0 PLL ready at %u MHz (L=%u)\n", vincec0, l0);
 +		}
 +	}
  }
  static uint32_t gVinceBootRegistered;   /* the boot CPU finished processor_start */
  static uint32_t gVinceStarted;
-@@ -214,7 +440,7 @@ SweetCPU::start(IOService *provider)
+@@ -214,7 +570,7 @@ SweetCPU::start(IOService *provider)
  
  #if defined(VINCE)
  	if (boot) {
@@ -278,3 +408,38 @@ index bbaec29..ea033f3 100644
  		vm_offset_t marks = ml_io_map(0x913F0000, 0x1000);
  		if (marks) {
  			for (int i = 0; i < 8; i++) {
+@@ -250,6 +606,11 @@ SweetCPU::start(IOService *provider)
+ 	/*
+ 	 * Boot CPU: re-enter through cpu_machine_init -> PE_cpu_machine_init. Secondary: cpu_start -> startCPU
+ 	 * (PSCI CPU_ON); the CPU then runs initCPU(true) itself.
+ 	 */
+-	result = processor_start(machProcessor);
++	if (!boot && vince_noc0 && (fPhysId & 0x100u) == 0) {
++		IOLog("SWEET CPU: cpu %u held back by vincenoc0\n", cpu->cpu_id);
++		result = KERN_SUCCESS;
++	} else {
++		result = processor_start(machProcessor);
++	}
+ #if defined(VINCE)
+@@ -284,5 +645,12 @@ SweetCPU::finishStart(const ml_topology_info_t *topology)
+ 	ml_set_max_cpus(topology->max_cpu_id + 1);
+ 	IOLog("SWEET CPU: %u CPUs, initialization complete; MHz %u %u %u %u %u %u %u %u\n", topology->num_cpus,
+ 	    gVinceMHz[0], gVinceMHz[1], gVinceMHz[2], gVinceMHz[3], gVinceMHz[4], gVinceMHz[5], gVinceMHz[6],
+ 	    gVinceMHz[7]);
++	if (vince_c0_diag.ran) {
++		IOLog("VINCE CLK: c0 diag cpu %u step %u failed %u; before cmd %#x cfg %#x cbcr %#x; step1 cmd %#x cfg %#x; step2 cmd %#x cfg %#x\n",
++		    vince_c0_diag.cpu, vince_c0_diag.step, vince_c0_diag.failed,
++		    vince_c0_diag.cmd0, vince_c0_diag.cfg0, vince_c0_diag.cbcr0,
++		    vince_c0_diag.cmd1, vince_c0_diag.cfg1,
++		    vince_c0_diag.cmd2, vince_c0_diag.cfg2);
++	}
+ }
+@@ -305,5 +673,8 @@ SweetCPU::initCPU(bool boot)
+ #if defined(VINCE)
+ 	vince_smp_mark(0x31);
++	if (!fBoot && (fPhysId & 0x100u) == 0) {
++		vince_c0_kick(getCPUNumber());
++	}
+ 	if (getCPUNumber() < 8) {
+ 		gVinceMHz[getCPUNumber()] = vince_cpu_mhz();
+ 	}

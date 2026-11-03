@@ -27,6 +27,27 @@ if [ -z "$KERNEL" ]; then
 fi
 echo "[*] kernel: $KERNEL ($(stat -c%s "$KERNEL") bytes)"
 
+# The canvas drives backboardd's render target.  A stale 1125x2436 ADT makes
+# iOS render off-screen and the panel stays black (this happened in Nov 2026).
+python - <<'EOF'
+import struct, sys
+sys.path.insert(0, 'tools')
+import adt
+root, _ = adt.parse(open('artifacts/dig-0xa.adt', 'rb').read())
+stack = [root]
+while stack:
+    node = stack.pop()
+    if node.prop('canvas-width') is not None:
+        w = struct.unpack('<I', node.prop('canvas-width'))[0]
+        h = struct.unpack('<I', node.prop('canvas-height'))[0]
+        break
+    stack.extend(getattr(node, 'children', []))
+else:
+    sys.exit('artifacts/dig-0xa.adt has no canvas-width node')
+assert (w, h) == (720, 1280), f'ADT canvas {w}x{h}, panel is 720x1280: the screen would stay black'
+print(f'[*] ADT canvas {w}x{h} OK')
+EOF
+
 python tools/mkpayload_dig.py "$KERNEL" artifacts/dig-0xa.adt artifacts/dig-ci.payload
 python shim/build.py artifacts/dig-ci.payload
 echo "[+] ready: artifacts/dig-shim-boot.img"
