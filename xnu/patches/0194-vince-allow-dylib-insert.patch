@@ -1,0 +1,29 @@
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -268,6 +268,8 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
+ 	if (mp != NULL && (vfs_flags(mp) & MNT_ROOTFS)) {
+ 		*cs_flags |= CS_PLATFORM_BINARY;
++		/* SWEET: allow DYLD_INSERT_LIBRARIES into rootfs daemons. */
++		*cs_flags &= ~(CS_RESTRICT | CS_REQUIRE_LV);
+ 	}
+ 	if (cs_blob != cs_blob->csb_ro_addr && cs_blob->csb_entitlements == NULL) {
+ 		sweet_amfi_attach_entitlements(cs_blob);
+ 	}
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5765,5 +5765,6 @@ exec_extract_strings(struct image_params *imgp)
+ 	if (!vince_env_parsed) {
+ 		vince_env_parse();
++		printf("VINCE ENV: %s -> %s\n", vince_env_name, vince_env_str);
+ 	}
+ 	if (vince_env_name[0] && imgp->ip_vp && imgp->ip_vp->v_name && strcmp(imgp->ip_vp->v_name, vince_env_name) == 0) {
+ 		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(vince_env_str), UIO_SYSSPACE, TRUE);
+@@ -5781,5 +5782,6 @@ exec_extract_strings(struct image_params *imgp)
+ 		}
+ 		imgp->ip_argspace -= new_ptr_size;
+ 		imgp->ip_envc++;
++		printf("VINCE ENV: injected %s into %s\n", vince_env_str, vince_env_name);
+ 	}
+ #endif
