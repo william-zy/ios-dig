@@ -121,3 +121,103 @@ a505→a506 同理：同一代 a5xx、同一套微码、同一套寄存器初始
 3. secure boot 配置（a506 有 content protection，a505 没有）——这反而让 a505 **更简单**。
 
 所以这里不需要“骗过硬件”，只需要把驱动里的三个常量（chipid、频率、zap 路径）改对。
+
+
+## 7. 实测进展（2026-11-03，DIG-AL00）
+
+驱动以 `0192-vince-dig-adreno-505.patch` 叠加在 vince 0181 上，boot arg：
+`diggpu=1 adreno=N digscm=0/1 adreno_pause=2500`。
+
+已确认（持久日志 `artifacts/log-gpu*.txt`）：
+
+| 步骤 | 实测值 | 结论 |
+| --- | --- | --- |
+| step1 | `CX_GDSC=0x80000000 GX_GDSC=0x222001 AHB=0x80008000 GFX=0x80004ff0` | CX 已开，GX 关闭，两个 GPU 分支都 CLK_OFF |
+| step2 | QFPROM 0x6018 = `0x3cd0 0x1000` | 0xa0000 基址正确，速度档 fuse 可读 |
+| step3 | CX `0x80000000` | 已经开启 |
+| step4 | GX 上电后 `0xa0222000`；GFX LDO CTRL 写 0x80000038 读回 `0x38`、STATUS=0 | GDSC 报 on，但 GFX LDO 的 bit31 不置位（status），GPU 电源仍可疑 |
+| step5 | 候选源 `0x107/0x108`：`CMD=0x2 GFX=0x4ff1`（GFX CLK_OFF=0）；`0x507/0x1/0x307/0x207` 全部 `CMD=0x3`（update pending） | **GFX3D RCG 正确源是 0x107/0x108（GPLL0/8），不是 8953 的 0x507** |
+| step5 | `AHB=0x90008001` 始终 CLK_OFF=1；GMEM CBCR 读回 0 | AHB 分支无法点亮，step6 第一次读 GPU 寄存器即同步外部中止（esr 0x96000010） |
+
+待解决：
+- AHB 分支的根时钟/父源：AHB CBCR 的 bit28/bit15 含义未确认；GMEM CBCR (0x59024) 读回 0。
+- GX GDSC 的 periph-retain（bit14）已加入下一版测试。
+- GFX LDO（0x185f000）的使能序列；vince 参考值 0x80000038 在 DIG 上 bit31 不置位。
+- 若仍不行，需要从 stock 内核反汇编 msm_gfx_ldo / gdsc 序列，或核对 8937 的 OXILI AHB root。
+
+
+## 8. 实测成功：Adreno 505 全流程点亮（probe11，2026-11-04）
+
+### 8.1 最终可用的上电顺序（dig_mode）
+
+1. **CX GDSCR = 0x59044**（不是 8953 的 0x5904c）：写 bit0 SW_COLLAPSE=0，轮询 bit31。
+2. **先启动 gfx3d root**（`qcom,enable-root-clk`）：CFG=0x107（GPLL0/8），
+   CMD bit0 update → 轮询清零 → CMD bit1 root enable，CMD 读回 0x2。
+3. **BHS 控制 0x185f01c**：bit0=0、bit9=0、bit4=1（a505 纯 BHS，无 gfx-ldo 节点）；
+   不要写 bit31。
+4. **GX GDSCR = 0x5901c**：写 SW_COLLAPSE=0 → 轮询 bit31=1（0xa0222000）；
+   再读 0x185f028 的 bit1 BHS_EN_REST_ACK（本次 10 ms 内未置位，但后续访问正常）。
+5. 分支时钟：GFX3D CBCR(0x59020) bit0、OXILI_AHB(0x59028) bit0（CLK_OFF 清零为
+   0x20008001）、GMEM(0x59024)、AON=**0x5904c**、TIMER(0x59040)、BIMC_GPU/GFX。
+6. GPU 寄存器 0x1c00000 可读：RBBM_AHB_CNTL0=0x1、VBIF_VER=0x200c0000。
+7. TZ `restore_sec_cfg(18)` 仍需要（返回 0）；a505 不需要 zap，step10 只清
+   RBBM_SECVID_TRUST_CNTL。
+
+### 8.2 微码与命令处理器
+
+- 使用手机自己的 `a530_pm4.fw`(19572 B, 0x5ff063) / `a530_pfp.fw`(15876 B, 0x5ff087)，
+  嵌入 `bsd/dev/dig_gpu_firmware.h`，由 `diggpu=1` 选择。
+- 日志（`artifacts/log-gpu11.txt`）：
+
+```
+step 8: loading PM4 (19572 B) / PFP (15876 B) ... ME running
+step 9: CP_MEM_WRITE -> 0xc0ffee01 (the GPU executed its first command), RPTR=13
+step 10: a505 skips the zap shader; RBBM_SECVID_TRUST_CNTL cleared
+step 11: CP_MEM_WRITE -> 0xc0ffee02; RBBM_STATUS=0x1 INT0=0 RPTR=17
+step 11: Adreno 506 command processor is up
+```
+
+### 8.3 产物与回归
+
+- 镜像：`repos/ios-dig/artifacts/dig-boot-gpu-probe11.img`
+  SHA256 `4effa0faf52145104cd0da08e6ae6875d32a8001f0bccbcabbc335886c6fd5f3`；
+  CI run 41696601004，commit `bba499a`。
+- cmdline：`vincec0=1094 diggpu=1 adreno=11 digscm=1 adreno_pause=1000`。
+- **注意**：当前新内核（含 0192/新 0180 的任意组合）会让 backboardd 选择
+  1125x2436 渲染目标，屏幕黑（系统仍在跑，持久日志可读）。旧稳定镜像
+  `dig-boot-8core.img` 画面正常；GPU 调试用新内核 + TWRP 拉日志。
+- 下一步：用户态 GPU 接口（VinceGPU 的 DRM ioctl + freedreno/sweetgl 注入
+  backboardd），或先做最小 2D 合成让 UI 可见。
+
+
+## 9. 黑屏渲染路径的根因（2026-11-04）
+
+### 9.1 隔离结果
+
+- 旧稳定镜像 `dig-boot-8core.img`（内核 = `d593ebf` 及之前）：backboardd 创建两个
+  **720x1280 keys=11** 显示面，UI 正常，日志无 `AppleM2ScalerCSCDriver` 失败。
+- 新内核（`d593ebf` + 仅 `0192`，GPU 初始化不执行、cmdline 与旧版完全相同）：
+  backboardd 额外创建 **1125x2436 keys=10** 渲染目标，并打印
+  `IOServiceMatchingfailed for: AppleM2ScalerCSCDriver`；显示面仍是 720x1280 且
+  有 swap，但内容是黑的。
+- 因此触发条件不是 c0 频率、不是 GPU 执行、不是 cmdline；是**内核二进制里多了
+  0192 的代码后，userspace 选择了 iPhone X 的 3x 离屏渲染路径**，而缩放器
+  `AppleM2ScalerCSCDriver` 在本移植里不存在，3x→720x1280 的合成/缩放无法完成。
+- 内核日志（CPU/时钟/FB）两者完全一致，`presented as 720x1280`；差异只在
+  backboardd 的渲染目标选择上，判定为内核布局/时序引发的 userspace 路径差异。
+
+### 9.2 参考做法（ios-sailfish）
+
+- sailfish 让 iOS 看到 **iPhone 8 面板（750x1334 @2x）**，由 GPU（freedreno）把每帧
+  双线性缩放到 1080x1920 面板，双缓冲、最高 60 Hz；CoreAnimation 的 GL ES
+  渲染器经 `sweetgl.dylib`（EAGL shim）跑在 Mesa freedreno 上。
+- 因此正确解法不是继续调内核显示常量，而是补齐**用户态 GPU/显示层**：
+  `VinceGPU` 的 DRM ioctl → libdrm/msm 模拟 → sweetgl/EAGL → 双缓冲呈现与 GPU 缩放。
+  这同时解决 3x 黑屏并带来真正的 GPU 加速。
+
+### 9.3 当前状态
+
+- 内核侧 Adreno 505 已全流程点亮（见第 8 节，probe11 日志）。
+- 日常使用仍是旧稳定镜像 `dig-boot-8core.img`（4×1401，画面正常）。
+- 下一步：按 `repos/ios-sailfish/tools/sweetgl`、`tools/sweetgpu-ca` 移植用户态，
+  或在 DIG 上先实现最小 2D/双缓冲呈现以恢复画面。
