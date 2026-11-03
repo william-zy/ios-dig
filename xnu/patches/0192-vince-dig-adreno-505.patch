@@ -1,0 +1,122 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -42,6 +42,12 @@
+ 
+ #define GPU_CORE_BASE_PA        0x01c00000u
+ #define GPU_CORE_SIZE           0x40000u
++
++/* DIG-AL00 (MSM8940 / Adreno 505): QFPROM is at 0xa0000 and the speed-bin
++ * fuse is at 0x6018 (qcom,gpu-speed-bin in the live DT). */
++#define QFPROM_BASE_PA_DIG      0x000a0000u
++#define QFPROM_SIZE_DIG         0x7000u
++#define QFPROM_SPEED_BIN_DIG    0x6018u
+ 
+ /* GCC Registers */
+ #define GCC_GFX3D_CMD_RCGR      0x59000u
+@@ -200,6 +206,7 @@
+ static uint32_t last_step = 0;
+ static uint32_t skip_steps = 0;
+ static uint32_t pause_ms = 0;
++static uint32_t dig_mode = 0;   /* boot arg diggpu=1: Adreno 505 on MSM8940 */
+ static vm_offset_t gcc_va = 0;
+ static vm_offset_t qfprom_va = 0;
+ static vm_offset_t gpu_va = 0;
+@@ -307,15 +314,17 @@
+ 
+ 	printf("adreno: step 2: reading QFPROM speed bin fuses\n");
+ 	if (!qfprom_va) {
+-		qfprom_va = ml_io_map(QFPROM_BASE_PA, QFPROM_SIZE);
++	qfprom_va = ml_io_map(dig_mode ? QFPROM_BASE_PA_DIG : QFPROM_BASE_PA,
++	    dig_mode ? QFPROM_SIZE_DIG : QFPROM_SIZE);
+ 		if (!qfprom_va) {
+ 			printf("adreno: step 2: FAILED to map QFPROM\n");
+ 			return false;
+ 		}
+ 	}
+-	f0 = reg_read(qfprom_va, 0x00a0);
+-	f1 = reg_read(qfprom_va, 0x00a4);
+-	printf("adreno: step 2: fuses at 0xa0: %#x %#x\n", f0, f1);
++	f0 = reg_read(qfprom_va, dig_mode ? QFPROM_SPEED_BIN_DIG : 0x00a0);
++	f1 = reg_read(qfprom_va, dig_mode ? QFPROM_SPEED_BIN_DIG + 4 : 0x00a4);
++	printf("adreno: step 2: fuses at %#x: %#x %#x\n",
++	    dig_mode ? QFPROM_SPEED_BIN_DIG : 0x00a0, f0, f1);
+ 	return true;
+ }
+ 
+@@ -494,13 +503,19 @@
+ 	printf("adreno: step 6: probing Adreno 506 hardware registers (GFX_CBCR=%#x, CLK_OFF=%u)\n",
+ 	    gfx_cbcr, (gfx_cbcr >> 31) & 1u);
+ 
+-	/* TZ must restore the GPU's secure configuration after CX comes up, or the first access aborts */
+-	sret = vince_scm_invoke("RESTORE_SEC_CFG(GPU IOMMU)", SCM_MP_RESTORE_SEC_CFG, ARGS_TWO_PLAIN,
+-	    GPU_IOMMU_SEC_ID, 0, 0, &ans);
+-	printf("adreno: step 6: restore_sec_cfg(%d, 0) -> ret=%d ans=%#llx\n", GPU_IOMMU_SEC_ID, sret, ans);
+-	if (sret != 0) {
+-		printf("adreno: step 6: TZ refused restore_sec_cfg, NOT touching GPU registers\n");
+-		return false;
++	/* TZ must restore the GPU's secure configuration after CX comes up, or the first access aborts.
++	 * The a505 has no content protection: the vendor driver never makes this call. */
++	if (dig_mode) {
++		printf("adreno: step 6: a505 has no content protection, skipping restore_sec_cfg\n");
++		sret = 0;
++	} else {
++		sret = vince_scm_invoke("RESTORE_SEC_CFG(GPU IOMMU)", SCM_MP_RESTORE_SEC_CFG, ARGS_TWO_PLAIN,
++		    GPU_IOMMU_SEC_ID, 0, 0, &ans);
++		printf("adreno: step 6: restore_sec_cfg(%d, 0) -> ret=%d ans=%#llx\n", GPU_IOMMU_SEC_ID, sret, ans);
++		if (sret != 0) {
++			printf("adreno: step 6: TZ refused restore_sec_cfg, NOT touching GPU registers\n");
++			return false;
++		}
+ 	}
+ 
+ 	if (!gpu_va) {
+@@ -767,6 +782,14 @@
+ static bool
+ step10_zap(void)
+ {
++	if (dig_mode) {
++		/* a505: no zap shader, the vendor driver just clears TRUST_CNTL. */
++		printf("adreno: step 10: a505 skips the zap shader\n");
++		gw(A5_RBBM_SECVID_TRUST_CNTL, 0);
++		__asm__ volatile("dsb sy" ::: "memory");
++		printf("adreno: step 10: RBBM_SECVID_TRUST_CNTL cleared, GPU out of secure mode\n");
++		return true;
++	}
+ 	uint64_t ans = 0;
+ 	int32_t ret;
+ 
+@@ -869,16 +892,16 @@
+ {
+ 	switch (which) {
+ 	case 0x01: /* MSM_PARAM_GPU_ID */
+-		*value = 506;
++		*value = dig_mode ? 505 : 506;
+ 		return true;
+ 	case 0x02: /* MSM_PARAM_GMEM_SIZE */
+ 		*value = 136 * 1024;
+ 		return true;
+ 	case 0x03: /* MSM_PARAM_CHIP_ID */
+-		*value = 0x05000600ull;
++		*value = dig_mode ? 0x05000500ull : 0x05000600ull;
+ 		return true;
+ 	case 0x04: /* MSM_PARAM_MAX_FREQ */
+-		*value = 650000000ull;
++		*value = dig_mode ? 450000000ull : 650000000ull;
+ 		return true;
+ 	case 0x05: /* MSM_PARAM_TIMESTAMP */
+ 		*value = mach_absolute_time();
+@@ -1013,10 +1036,11 @@
+ 	}
+ 	PE_parse_boot_argn("adreno_skip", &skip_steps, sizeof(skip_steps));
+ 	PE_parse_boot_argn("adreno_pause", &pause_ms, sizeof(pause_ms));
++	PE_parse_boot_argn("diggpu", &dig_mode, sizeof(dig_mode));
+ 
+ 	printf("==================================================\n");
+-	printf("VINCE ADRENO 506: starting steps 1 to %u (skip mask %#x, pause %u ms)\n",
+-	    last_step, skip_steps, pause_ms);
++	printf("VINCE ADRENO %s: starting steps 1 to %u (skip mask %#x, pause %u ms)\n",
++	    dig_mode ? "505/DIG" : "506", last_step, skip_steps, pause_ms);
+ 	printf("==================================================\n");
+ 
+ 	for (i = 1; i <= last_step; i++) {
