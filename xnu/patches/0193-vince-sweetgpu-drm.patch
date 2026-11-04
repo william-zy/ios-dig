@@ -143,7 +143,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  }
  
  IOReturn
-@@ -407,6 +485,270 @@
+@@ -407,6 +485,268 @@
  		IOFree(cmds, request->nr_cmds * sizeof(*cmds));
  	}
  	return ret;
@@ -198,7 +198,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
 +		memory->release();
 +		return kIOReturnNoMemory;
 +	}
-+	IOLockLock(gGPULock);
++	/* externalMethod holds gGPULock; IOLock is not recursive. */
 +	for (uint32_t n = 0; n < GPU_BUFFERS; n++) {
 +		uint32_t h = (fNextBuffer + n) % GPU_BUFFERS;
 +		if (fBuffers[h].memory == NULL) {
@@ -218,7 +218,6 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
 +		b->pa = pa;
 +		b->npages = npages;
 +	}
-+	IOLockUnlock(gGPULock);
 +	if (slot == GPU_BUFFERS) {
 +		umap->release();
 +		IOFreeData(pa, npages * sizeof(uint64_t));
@@ -281,7 +280,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
 +		base = pa[0];
 +	}
 +	md->retain();
-+	IOLockLock(gGPULock);
++	/* externalMethod holds gGPULock; IOLock is not recursive. */
 +	for (uint32_t n = 0; n < GPU_BUFFERS; n++) {
 +		uint32_t h = (fNextBuffer + n) % GPU_BUFFERS;
 +		if (fBuffers[h].memory == NULL) {
@@ -300,7 +299,6 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
 +		b->pa = pa;
 +		b->npages = npages;
 +	}
-+	IOLockUnlock(gGPULock);
 +	if (slot == GPU_BUFFERS) {
 +		md->release();
 +		IOFreeData(pa, npages * sizeof(uint64_t));
@@ -414,7 +412,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  }
  
  IOReturn
-@@ -448,11 +790,136 @@
+@@ -448,11 +788,136 @@
  	IOReturn ret = kIOReturnSuccess;
  	uint64_t zero = 0, patience;
  
