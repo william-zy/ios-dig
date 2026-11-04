@@ -46,3 +46,16 @@ index 29134ba..0c3fdbb 100644
     if (rsc->layout.pitch0 < (prsc->width0 * rsc->layout.cpp) ||
         fd_resource_pitch(rsc, 0) != rsc->layout.pitch0)
        return false;
+diff --git a/src/mesa/state_tracker/st_manager.c b/src/mesa/state_tracker/st_manager.c
+--- a/src/mesa/state_tracker/st_manager.c
++++ b/src/mesa/state_tracker/st_manager.c
+@@ -1077,7 +1077,8 @@
+    st->frontend_screen = fscreen;
+ 
+    if (st->ctx->IntelBlackholeRender &&
+-       st->screen->caps.frontend_noop)
++       st->screen->caps.frontend_noop &&
++       st->pipe->set_frontend_noop)
+       st->pipe->set_frontend_noop(st->pipe, st->ctx->IntelBlackholeRender);
+ 
+    *error = ST_CONTEXT_SUCCESS;
