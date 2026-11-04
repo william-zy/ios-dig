@@ -1,0 +1,140 @@
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -141,6 +141,7 @@
+ 	uint32_t lastFence;
+ 	bool used;
+ 	SweetSurface *surface;          /* kSweetGemImport */
++	uint64_t poolPa;                /* kSweetGemNew: range from the boot pool */
+ };
+ 
+ static IOLock *gGPULock = NULL;
+@@ -309,6 +310,10 @@
+ 		IOFreeData(b->pa, b->npages * sizeof(uint64_t));
+ 		b->pa = NULL;
+ 	}
++	if (b->poolPa != 0) {
++		sweet_pixels_free(b->poolPa, b->size);
++		b->poolPa = 0;
++	}
+ 	bzero(b, sizeof(*b));
+ }
+ 
+@@ -496,10 +501,11 @@
+ VinceGPUUserClient::sweetGemNew(uint64_t size, uint64_t *out)
+ {
+ 	uint64_t rounded = round_page_64(size);
+-	IOBufferMemoryDescriptor *memory;
++	IOMemoryDescriptor *memory = NULL;
++	IOBufferMemoryDescriptor *buffer = NULL;
+ 	IOMemoryMap *umap;
+ 	uint64_t *pa;
+-	uint64_t base = 0;
++	uint64_t base = 0, poolPa = 0;
+ 	uint32_t npages, slot = GPU_BUFFERS;
+ 	struct gpu_buffer *b = NULL;
+ 
+@@ -508,31 +514,58 @@
+ 	}
+ 	/*
+ 	 * The SMMU is in bypass, so a BO must be one contiguous physical range
+-	 * for the single IOVA Mesa gets back.  A plain buffer descriptor scatters
+-	 * its pages once the allocation is larger than a few of them (the first
+-	 * 256 KB Mesa texture failed with kIOReturnNoMemory).
++	 * for the single IOVA Mesa gets back.  Prefer the boot-time pool: by the
++	 * time Mesa allocates 1 MiB buffers, vm_page_find_contiguous() cannot
++	 * find 256 consecutive pages at all.
+ 	 */
+-	memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+-	    kIODirectionInOut | kIOMemoryKernelUserShared | kIOMemoryPhysicallyContiguous,
+-	    (vm_size_t)rounded, PAGE_SIZE);
+-	if (memory == NULL) {
+-		IOLog("VinceGPU: no contiguous BO for %llu bytes\n", (unsigned long long)rounded);
+-		return kIOReturnNoMemory;
++	poolPa = sweet_pixels_alloc((vm_size_t)rounded);
++	if (poolPa != 0) {
++		IOMemoryMap *kmap;
++		memory = IOMemoryDescriptor::withPhysicalAddress(poolPa, (IOByteCount)rounded, kIODirectionInOut);
++		kmap = memory != NULL ? memory->map(kIOMapDefaultCache) : NULL;
++		if (kmap != NULL) {
++			bzero((void *)kmap->getVirtualAddress(), (size_t)rounded);
++			kmap->release();
++		} else {
++			OSSafeReleaseNULL(memory);
++			sweet_pixels_free(poolPa, (vm_size_t)rounded);
++			poolPa = 0;
++		}
++	}
++	if (poolPa == 0) {
++		buffer = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++			kIODirectionInOut | kIOMemoryKernelUserShared | kIOMemoryPhysicallyContiguous,
++			(vm_size_t)rounded, PAGE_SIZE);
++		if (buffer == NULL) {
++			IOLog("VinceGPU: no contiguous BO for %llu bytes\n", (unsigned long long)rounded);
++			return kIOReturnNoMemory;
++		}
++		bzero(buffer->getBytesNoCopy(), (size_t)rounded);
++		memory = buffer;
+ 	}
+-	bzero(memory->getBytesNoCopy(), (size_t)rounded);
+ 	npages = (uint32_t)(rounded / PAGE_SIZE);
+ 	pa = (uint64_t *)IOMallocData(npages * sizeof(uint64_t));
+ 	if (pa == NULL) {
+ 		memory->release();
++		if (poolPa != 0) {
++			sweet_pixels_free(poolPa, (vm_size_t)rounded);
++		}
+ 		return kIOReturnNoMemory;
+ 	}
+ 	for (uint32_t p = 0; p < npages; p++) {
+ 		IOByteCount segment = 0;
+-		pa[p] = memory->getPhysicalSegment((IOByteCount)p * PAGE_SIZE, &segment, kIOMemoryMapperNone);
+-		if (pa[p] == 0 || (pa[p] & PAGE_MASK) != 0 || segment < PAGE_SIZE ||
++		if (poolPa != 0) {
++			pa[p] = poolPa + (uint64_t)p * PAGE_SIZE;
++		} else {
++			pa[p] = memory->getPhysicalSegment((IOByteCount)p * PAGE_SIZE, &segment, kIOMemoryMapperNone);
++		}
++		if (pa[p] == 0 || (pa[p] & PAGE_MASK) != 0 || (poolPa == 0 && segment < PAGE_SIZE) ||
+ 		    (p != 0 && pa[p] != base + (uint64_t)p * PAGE_SIZE)) {
+ 			IOFreeData(pa, npages * sizeof(uint64_t));
+ 			memory->release();
++			if (poolPa != 0) {
++				sweet_pixels_free(poolPa, (vm_size_t)rounded);
++			}
+ 			return kIOReturnNoMemory;
+ 		}
+ 		base = pa[0];
+@@ -542,6 +575,9 @@
+ 	if (umap == NULL) {
+ 		IOFreeData(pa, npages * sizeof(uint64_t));
+ 		memory->release();
++		if (poolPa != 0) {
++			sweet_pixels_free(poolPa, (vm_size_t)rounded);
++		}
+ 		return kIOReturnNoMemory;
+ 	}
+ 	/* externalMethod holds gGPULock; IOLock is not recursive. */
+@@ -557,17 +593,21 @@
+ 		b = &fBuffers[slot];
+ 		bzero(b, sizeof(*b));
+ 		b->memory = memory;
+-		b->kernel = (uint8_t *)memory->getBytesNoCopy();
++		b->kernel = buffer != NULL ? (uint8_t *)buffer->getBytesNoCopy() : NULL;
+ 		b->address = base;
+ 		b->size = rounded;
+ 		b->umap = umap;
+ 		b->pa = pa;
+ 		b->npages = npages;
++		b->poolPa = poolPa;
+ 	}
+ 	if (slot == GPU_BUFFERS) {
+ 		umap->release();
+ 		IOFreeData(pa, npages * sizeof(uint64_t));
+ 		memory->release();
++		if (poolPa != 0) {
++			sweet_pixels_free(poolPa, (vm_size_t)rounded);
++		}
+ 		return kIOReturnNoResources;
+ 	}
+ 	if (!fLoggedNew) {

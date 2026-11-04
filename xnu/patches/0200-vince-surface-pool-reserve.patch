@@ -23,7 +23,7 @@ diff --git a/osfmk/vm/vm_init.c b/osfmk/vm/vm_init.c
 + * SweetSurface hand out 4 MiB slots.  Held forever, wired and zeroed.
 + */
 +#define VINCE_SURF_SLOT_SIZE    (4u << 20)
-+#define VINCE_SURF_POOL_SIZE    (16u * VINCE_SURF_SLOT_SIZE)
++#define VINCE_SURF_POOL_SIZE    (32u * VINCE_SURF_SLOT_SIZE)
 +
 +uint64_t  vince_surface_pool_pa;
 +vm_size_t vince_surface_pool_size;
