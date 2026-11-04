@@ -143,7 +143,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  }
  
  IOReturn
-@@ -407,6 +485,268 @@
+@@ -407,6 +485,276 @@
  		IOFree(cmds, request->nr_cmds * sizeof(*cmds));
  	}
  	return ret;
@@ -168,9 +168,17 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
 +	if (rounded == 0 || rounded > GPU_BUFFER_MAX || fBuffers == NULL) {
 +		return kIOReturnBadArgument;
 +	}
++	/*
++	 * The SMMU is in bypass, so a BO must be one contiguous physical range
++	 * for the single IOVA Mesa gets back.  A plain buffer descriptor scatters
++	 * its pages once the allocation is larger than a few of them (the first
++	 * 256 KB Mesa texture failed with kIOReturnNoMemory).
++	 */
 +	memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
-+	    kIODirectionInOut | kIOMemoryKernelUserShared, (vm_size_t)rounded, PAGE_SIZE);
++	    kIODirectionInOut | kIOMemoryKernelUserShared | kIOMemoryPhysicallyContiguous,
++	    (vm_size_t)rounded, PAGE_SIZE);
 +	if (memory == NULL) {
++		IOLog("VinceGPU: no contiguous BO for %llu bytes\n", (unsigned long long)rounded);
 +		return kIOReturnNoMemory;
 +	}
 +	bzero(memory->getBytesNoCopy(), (size_t)rounded);
@@ -412,7 +420,7 @@ diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
  }
  
  IOReturn
-@@ -448,11 +788,136 @@
+@@ -448,11 +796,136 @@
  	IOReturn ret = kIOReturnSuccess;
  	uint64_t zero = 0, patience;
  
