@@ -148,7 +148,9 @@ sweetgl_create(int api, struct sweetgl_ctx *share)
 		.minor = api >= 3 ? 1 : 0,      /* 3.1: glGetTexLevelParameteriv (eagl.c rect textures) */
 	};
 	enum st_context_error err = ST_CONTEXT_SUCCESS;
+	sweet_drm_log("sweetgl: create GLES %d context, screen %p", attribs.major, (void *)fscreen);
 	struct st_context *st = st_api_create_context(fscreen, &attribs, &err, share ? share->st : NULL);
+	sweet_drm_log("sweetgl: st_api_create_context -> %p err %d", (void *)st, err);
 	if (st == NULL) {
 		sweet_drm_log("sweetgl: GLES %d context failed: %d", attribs.major, err);
 		return NULL;

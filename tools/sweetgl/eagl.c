@@ -1720,7 +1720,9 @@ bind_surface(IOSurfaceRef s, GLenum target, GLenum format, GLenum type, uint32_t
 static id
 m_init(id self, SEL cmd, NSUInteger api, id props)
 {
+	sweet_drm_log("sweetgl: EAGL initWithAPI %lu", (unsigned long)api);
 	struct sweetgl_ctx *ctx = api >= 2 && sweetgl_init() ? sweetgl_create((int)api, NULL) : NULL;
+	sweet_drm_log("sweetgl: EAGL context object %p", (void *)ctx);
 	struct sgl_context *c = ctx ? calloc(1, sizeof(*c)) : NULL;
 	int slot = -1;
 	pthread_mutex_lock(&ctx_lock);
@@ -1794,6 +1796,10 @@ static void *
 m_macro(id self, SEL cmd)
 {
 	struct sgl_context *c = lookup(self);
+	static int n;
+	if (n++ < 8) {
+		sweet_drm_log("sweetgl: getMacroContextPrivate -> %p (Mesa %d)", (void *)c, c != NULL);
+	}
 	return c ? (void *)c : ((void *(*)(id, SEL))orig_macro)(self, cmd);
 }
 
@@ -1828,6 +1834,10 @@ static BOOL
 m_set_current(id cls, SEL cmd, id eagl)
 {
 	struct sgl_context *c = lookup(eagl);
+	static int n;
+	if (n++ < 8) {
+		sweet_drm_log("sweetgl: setCurrentContext %p -> %s", (void *)eagl, c ? "Mesa" : "Apple");
+	}
 	if (c) {
 		sgl_bind(c);
 		current_eagl = eagl;
