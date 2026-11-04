@@ -1,0 +1,183 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -75,11 +75,85 @@
+ static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
+ #define SWEET_SURFACE_WIRED_MAX         (1536ull << 20)
+ 
++#if defined(ARM64_BOARD_CONFIG_VINCE)
++/*
++ * Slots in the physically contiguous pool reserved by vm_init.c.  The GPU
++ * SMMU is in bypass, so an imported surface must be one run; a late
++ * vm_page_find_contiguous() cannot find 3.75 MiB, the boot-time pool can.
++ */
++extern uint64_t  vince_surface_pool_pa;
++extern vm_size_t vince_surface_pool_size;
++#define SWEET_POOL_SLOT_SIZE    (4u << 20)
++#define SWEET_POOL_MAX_SLOTS    ((64u << 20) / SWEET_POOL_SLOT_SIZE)
++
++static uint32_t sweet_pool_used;
++
++static int
++sweet_pool_alloc(uint32_t size)
++{
++	uint32_t slots = (uint32_t)(vince_surface_pool_size / SWEET_POOL_SLOT_SIZE);
++	int slot = -1;
++
++	if (vince_surface_pool_pa == 0 || size > SWEET_POOL_SLOT_SIZE) {
++		return -1;
++	}
++	if (slots > SWEET_POOL_MAX_SLOTS) {
++		slots = SWEET_POOL_MAX_SLOTS;
++	}
++	IOLockLock(sweet_surface_lock);
++	for (uint32_t i = 0; i < slots; i++) {
++		if (!(sweet_pool_used & (1u << i))) {
++			sweet_pool_used |= 1u << i;
++			slot = (int)i;
++			break;
++		}
++	}
++	IOLockUnlock(sweet_surface_lock);
++	return slot;
++}
++
++static void
++sweet_pool_free(int slot)
++{
++	if (slot < 0 || (uint32_t)slot >= SWEET_POOL_MAX_SLOTS) {
++		return;
++	}
++	IOLockLock(sweet_surface_lock);
++	sweet_pool_used &= ~(1u << slot);
++	IOLockUnlock(sweet_surface_lock);
++}
++
++/* Pixel memory for a pooled slot; cpm_allocate(KMA_ZERO) already zeroed it. */
++static bool
++sweet_pool_memory(SweetSurface *s, int slot)
++{
++	if (slot < 0) {
++		return false;
++	}
++	s->poolSlot = slot;
++	s->memory = IOMemoryDescriptor::withPhysicalAddress(
++		vince_surface_pool_pa + (uint64_t)slot * SWEET_POOL_SLOT_SIZE,
++		s->allocSize, kIODirectionInOut);
++	s->mapCache = kIOMapDefaultCache;
++	if (s->memory == NULL) {
++		sweet_pool_free(slot);
++		s->poolSlot = -1;
++		return false;
++	}
++	return true;
++}
++#endif
++
+ OSDefineMetaClassAndStructors(SweetSurface, OSObject);
+ 
+ void
+ SweetSurface::free()
+ {
++#if defined(ARM64_BOARD_CONFIG_VINCE)
++	if (poolSlot >= 0) {
++		sweet_pool_free(poolSlot);
++	} else
++#endif
+ 	if (OSDynamicCast(IOBufferMemoryDescriptor, memory) != NULL) {
+ 		OSAddAtomic64(-(SInt64)allocSize, (volatile SInt64 *)&sweet_surface_wired);
+ 	}
+@@ -200,7 +274,11 @@
+ {
+ 	sweet_surface_init_lock();
+ 	SweetSurface *s = OSTypeAlloc(SweetSurface);
+-	if (s == NULL || !s->init()) {
++	if (s == NULL) {
++		return NULL;
++	}
++	s->poolSlot = -1;
++	if (!s->init()) {
+ 		OSSafeReleaseNULL(s);
+ 		return NULL;
+ 	}
+@@ -284,6 +362,16 @@
+ 	s->elementWidth = s->elementHeight = 1;
+ 	s->pixelFormat = pixelFormat;
+ 	s->allocSize = (uint32_t)round_page(s->bytesPerRow * height);
++#if defined(ARM64_BOARD_CONFIG_VINCE)
++	int slot = sweet_pool_alloc(s->allocSize);
++	if (slot >= 0) {
++		if (!sweet_pool_memory(s, slot) || !sweet_surface_publish(s)) {
++			s->release();
++			return NULL;
++		}
++		return s;
++	}
++#endif
+ 	IOBufferMemoryDescriptor *mem = sweet_surface_alloc_pixels(s->allocSize, NULL);
+ 	if (mem == NULL) {
+ 		s->release();
+@@ -738,25 +826,36 @@
+ 	s->parentID = args->scalarInputCount > 0 ? (uint32_t)args->scalarInput[0] : 0;
+ 	ret = sweet_surface_layout(s, props);
+ 	if (ret == kIOReturnSuccess) {
+-		IOBufferMemoryDescriptor *mem = NULL;
+-		bool contiguous = false;
+-		if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired) +
+-		    s->allocSize <= SWEET_SURFACE_WIRED_MAX) {
+-			mem = sweet_surface_alloc_pixels(s->allocSize, &contiguous);
+-		}
+-		if (mem == NULL) {
+-			OSAddAtomic64(-(SInt64)s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
+-			ret = kIOReturnNoMemory;
+-		} else {
+-			bzero(mem->getBytesNoCopy(), s->allocSize);
+-			s->memory = mem;
+-			s->mapCache = kIOMapDefaultCache;
++#if defined(ARM64_BOARD_CONFIG_VINCE)
++		int slot = sweet_pool_alloc(s->allocSize);
++		if (slot >= 0 && sweet_pool_memory(s, slot)) {
+ 			if (!sweet_surface_publish(s)) {
+ 				ret = kIOReturnNoResources;
+ 			}
+-			if (!contiguous) {
+-				IOLog("SWEET SURF: %ux%u %u bytes not physically contiguous\n",
+-				    s->width, s->height, s->allocSize);
++		} else
++#endif
++		{
++			IOBufferMemoryDescriptor *mem = NULL;
++			bool contiguous = false;
++			if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired) +
++			    s->allocSize <= SWEET_SURFACE_WIRED_MAX) {
++				mem = sweet_surface_alloc_pixels(s->allocSize, &contiguous);
++			}
++
++			if (mem == NULL) {
++				OSAddAtomic64(-(SInt64)s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
++				ret = kIOReturnNoMemory;
++			} else {
++				bzero(mem->getBytesNoCopy(), s->allocSize);
++				s->memory = mem;
++				s->mapCache = kIOMapDefaultCache;
++				if (!sweet_surface_publish(s)) {
++					ret = kIOReturnNoResources;
++				}
++				if (!contiguous) {
++					IOLog("SWEET SURF: %ux%u %u bytes not physically contiguous\n",
++					    s->width, s->height, s->allocSize);
++				}
+ 			}
+ 		}
+ 	}
+diff --git a/iokit/Kernel/arm/SweetSurface.h b/iokit/Kernel/arm/SweetSurface.h
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -39,6 +39,7 @@
+ 	IOOptionBits              mapCache;     /* cache mode for user mappings */
+ 	IOBufferMemoryDescriptor *state;        /* shared state page, read-only for users */
+ 	IOMemoryMap              *kernelMap;    /* lazily created for kernel copies */
++	int                       poolSlot;     /* VINCE contiguous pool slot, or -1 */
+ 
+ 	bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
+ 	void free() APPLE_KEXT_OVERRIDE;

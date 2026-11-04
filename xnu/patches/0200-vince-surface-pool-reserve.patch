@@ -1,0 +1,68 @@
+diff --git a/osfmk/vm/vm_init.c b/osfmk/vm/vm_init.c
+--- a/osfmk/vm/vm_init.c
++++ b/osfmk/vm/vm_init.c
+@@ -73,6 +73,7 @@
+ #include <vm/vm_map_internal.h>
+ #include <vm/vm_page.h>
+ #include <vm/vm_kern.h>
++#include <vm/cpm.h>
+ #include <vm/memory_object.h>
+ #include <vm/vm_fault.h>
+ #include <vm/vm_init.h>
+@@ -94,6 +95,45 @@
+ 	kernel_debug_string_early(message);
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_VINCE)
++/*
++ * VINCE: the GPU's SMMU is in bypass, so anything it dereferences must be one
++ * physically contiguous run.  IOSurfaces (720x1280x4 = 3.75 MiB) are created
++ * long after boot, when the free lists are too fragmented for
++ * vm_page_find_contiguous() to find 960 consecutive pages; reserve a pool
++ * here, while the free list is still mostly one large run, and let
++ * SweetSurface hand out 4 MiB slots.  Held forever, wired and zeroed.
++ */
++#define VINCE_SURF_SLOT_SIZE    (4u << 20)
++#define VINCE_SURF_POOL_SIZE    (16u * VINCE_SURF_SLOT_SIZE)
++
++uint64_t  vince_surface_pool_pa;
++vm_size_t vince_surface_pool_size;
++
++static void
++vince_surface_pool_reserve(void)
++{
++	static const vm_size_t sizes[] = {
++		VINCE_SURF_POOL_SIZE,
++		VINCE_SURF_POOL_SIZE / 2,
++		4u * VINCE_SURF_SLOT_SIZE,
++	};
++	vm_page_t first;
++
++	for (size_t i = 0; i < ARRAY_COUNT(sizes); i++) {
++		if (cpm_allocate(sizes[i], &first, 0, 0, TRUE, KMA_ZERO) != KERN_SUCCESS) {
++			continue;
++		}
++			vince_surface_pool_pa = (uint64_t)VM_PAGE_GET_PHYS_PAGE(first) << PAGE_SHIFT;
++		vince_surface_pool_size = sizes[i];
++		printf("VINCE SURF: reserved %u MiB physically contiguous at 0x%llx\n",
++		    (unsigned)(sizes[i] >> 20), vince_surface_pool_pa);
++		return;
++	}
++	printf("VINCE SURF: no physically contiguous surface pool\n");
++}
++#endif
++
+ /*
+  *	vm_mem_bootstrap initializes the virtual memory system.
+  *	This is done only by the first cpu up.
+@@ -137,6 +177,10 @@
+ 
+ 	kernel_startup_initialize_upto(STARTUP_SUB_ZALLOC);
+ 
++#if defined(ARM64_BOARD_CONFIG_VINCE)
++	vince_surface_pool_reserve();
++#endif
++
+ 	if (iokit_iomd_setownership_enabled) {
+ 		kprintf("IOKit IOMD setownership ENABLED\n");
+ 	} else {
