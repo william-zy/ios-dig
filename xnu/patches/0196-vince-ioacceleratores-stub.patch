@@ -1,7 +1,8 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -1095,4 +1095,18 @@
+@@ -141,6 +141,20 @@
+ 
  OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
  
 +/*
@@ -20,7 +21,8 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +
  class IOMobileFramebufferUserClient : public IOUserClient {
  	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
-@@ -1157,3 +1157,11 @@
+ 
+@@ -281,6 +295,13 @@
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
  	registerService();
@@ -31,4 +33,6 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +		es->registerService();
 +	}
 +	OSSafeReleaseNULL(es);
-+
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u, panel %u bpp\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH, fPanelBpp * 8);
+ 	if (fScaled) {
