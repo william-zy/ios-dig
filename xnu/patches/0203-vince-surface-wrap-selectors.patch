@@ -1,0 +1,26 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -961,6 +961,22 @@
+ 		sweet_surf_log_once("sel", selector);
+ 		return sweet_struct_out(args, limits, sizeof(limits));
+ 	}
++	case 6:        /* IOSurfaceClientWrapClientImage */
++	case 7: {      /* IOSurfaceClientWrapClientMemory */
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		if (args->structureInput != NULL && args->structureInputSize >= 0x20) {
++			const uint32_t *p = (const uint32_t *)args->structureInput;
++			IOLog("SWEET SURF: %s sel %u wrap %08x %08x %08x %08x %08x %08x %08x %08x\n",
++				name, selector, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
++		} else {
++			IOLog("SWEET SURF: %s sel %u wrap no descriptor (\%u bytes)\n",
++				name, selector, args->structureInputSize);
++		}
++		/* No client-owned image support: a zeroed lock result builds a
++		 * client with a NULL state page and CA crashes in memmove. */
++		return kIOReturnUnsupported;
++	}
+ 	case kSweetSurfaceCreate:
+ 		return create(args);
+ 	case kSweetSurfaceLookup: {
