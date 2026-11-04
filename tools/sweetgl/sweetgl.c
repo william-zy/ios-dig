@@ -84,6 +84,19 @@ sweet_drm_log(const char *fmt, ...)
 	(void)write(fd, line, n);
 }
 
+/*
+ * The state tracker calls fscreen->get_param() while creating a context
+ * (ST_MANAGER_BROKEN_INVALIDATE).  A calloc'ed pipe_frontend_screen leaves
+ * every callback NULL, so the first GEM/context creation jumped to 0.
+ */
+static int
+sweetgl_get_param(struct pipe_frontend_screen *fscreen, enum st_manager_param param)
+{
+	(void)fscreen;
+	(void)param;
+	return 0;
+}
+
 bool
 sweetgl_init(void)
 {
@@ -119,6 +132,7 @@ sweetgl_init(void)
 			} else {
 				fscreen = calloc(1, sizeof(*fscreen));
 				fscreen->screen = screen;
+				fscreen->get_param = sweetgl_get_param;
 				sweetgl_image_hooks(fscreen);  /* before any context: st checks them at creation */
 				sweet_drm_log("sweetgl: screen %s (%s)", screen->get_name(screen),
 				    screen->get_vendor(screen));
