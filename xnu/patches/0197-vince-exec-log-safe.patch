@@ -1,59 +1,34 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7374,6 +7374,21 @@
- 	return error;
- }
- 
-+#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_VINCE)
-+extern ppnum_t pmap_find_phys_nofault(pmap_t map, addr64_t va);
-+
-+/*
-+ * The argument strings live in the purgeable execargs map: by the time this
-+ * runs a page can already be gone (its VA then faults on read, which in the
-+ * kernel is a panic, not a page-in).  Only touch bytes the MMU maps.
-+ */
-+static bool
-+vince_exec_page_mapped(const char *p)
-+{
-+	return pmap_find_phys_nofault(kernel_pmap, (addr64_t)(uintptr_t)p) != 0;
-+}
-+#endif
-+
- static int
- process_signature(proc_t p, struct image_params *imgp)
- {
-@@ -7468,15 +7483,28 @@
- 				/* xpcproxy's argv names the launchd job it starts */
- 				char *a = imgp->ip_startargv;
- 				char *e = imgp->ip_endargv;
+@@ -7463,23 +7463,13 @@
+ 				goto done;
+ 			}
+ #if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_VINCE)
+-			/* SWEET runs every iOS binary this way: one short line per exec. */
+-			if (imgp->ip_argc > 1 && imgp->ip_startargv != NULL && imgp->ip_endargv > imgp->ip_startargv) {
+-				/* xpcproxy's argv names the launchd job it starts */
+-				char *a = imgp->ip_startargv;
+-				char *e = imgp->ip_endargv;
 -				int n = 0;
 -				while (a < e && *a != '\0' && n < 1) {
-+				long n = 0;
-+
-+				while (a < e && vince_exec_page_mapped(a) && *a != '\0') {
- 					a++;
- 				}
-+				if (a < e && vince_exec_page_mapped(a)) {
-+					a++;            /* step over argv[0]'s NUL */
-+				}
- 				if (a < e) {
 -					a++;
-+					n = MIN((long)60, (long)(e - a));
-+				}
-+				if (n == 0) {
-+					printf("exec %s\n", p->p_name);
-+				} else if (vince_exec_page_mapped(a) &&
-+				    vince_exec_page_mapped(a + n - 1)) {
-+					/* 60 bytes span at most two pages; both are resident */
-+					printf("exec %s [%.*s]\n", p->p_name, (int)n, a);
-+				} else {
-+					/* reading an unmapped page in the kernel is a data abort */
-+					printf("exec %s [argv %p..%p strings %p argc %u unmapped]\n",
-+					    p->p_name, a, e, imgp->ip_strings, imgp->ip_argc);
- 				}
+-				}
+-				if (a < e) {
+-					a++;
+-				}
 -				/* never read past the end of the argument strings: a page boundary there is a kernel data abort */
 -				printf("exec %s [%.*s]\n", p->p_name, (a < e) ? (int)MIN((long)60, (long)(e - a)) : 0, (a < e) ? a : "");
- 			} else {
- 				printf("exec %s\n", p->p_name);
- 			}
+-			} else {
+-				printf("exec %s\n", p->p_name);
+-			}
++			/*
++			 * SWEET runs every iOS binary this way: one short line per exec.
++			 * Do not print argv: it lives in purgeable execargs memory, and a page
++			 * reclaimed between the mapping check and the read is a kernel data
++			 * abort inside ___doprnt.
++			 */
++			printf("exec %s\n", p->p_name);
+ #else
+ 			printf("Allowing spawn of iOS binary %s since it has "
+ 			    "com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch "
