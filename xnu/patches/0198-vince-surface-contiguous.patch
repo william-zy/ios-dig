@@ -1,0 +1,65 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -214,6 +214,27 @@
+ 	return s;
+ }
+ 
++/*
++ * The GPU's SMMU is in bypass, so an imported surface must be one physically
++ * contiguous run.  Fall back to ordinary pages when that cannot be allocated
++ * (the CPU copy paths still work, only the GPU import fails).
++ */
++static IOBufferMemoryDescriptor *
++sweet_surface_alloc_pixels(uint32_t size, bool *contiguous)
++{
++	IOBufferMemoryDescriptor *mem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++	    kIODirectionInOut | kIOMemoryKernelUserShared | kIOMemoryPhysicallyContiguous,
++	    size, page_size);
++	if (contiguous != NULL) {
++		*contiguous = mem != NULL;
++	}
++	if (mem == NULL) {
++		mem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++		    kIODirectionInOut | kIOMemoryKernelUserShared, size, page_size);
++	}
++	return mem;
++}
++
+ static bool
+ sweet_surface_publish(SweetSurface *s)
+ {
+@@ -263,8 +284,7 @@
+ 	s->elementWidth = s->elementHeight = 1;
+ 	s->pixelFormat = pixelFormat;
+ 	s->allocSize = (uint32_t)round_page(s->bytesPerRow * height);
+-	IOBufferMemoryDescriptor *mem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+-	    kIODirectionInOut | kIOMemoryKernelUserShared, s->allocSize, page_size);
++	IOBufferMemoryDescriptor *mem = sweet_surface_alloc_pixels(s->allocSize, NULL);
+ 	if (mem == NULL) {
+ 		s->release();
+ 		return NULL;
+@@ -719,10 +739,10 @@
+ 	ret = sweet_surface_layout(s, props);
+ 	if (ret == kIOReturnSuccess) {
+ 		IOBufferMemoryDescriptor *mem = NULL;
++		bool contiguous = false;
+ 		if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&sweet_surface_wired) +
+ 		    s->allocSize <= SWEET_SURFACE_WIRED_MAX) {
+-			mem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+-			    kIODirectionInOut | kIOMemoryKernelUserShared, s->allocSize, page_size);
++			mem = sweet_surface_alloc_pixels(s->allocSize, &contiguous);
+ 		}
+ 		if (mem == NULL) {
+ 			OSAddAtomic64(-(SInt64)s->allocSize, (volatile SInt64 *)&sweet_surface_wired);
+@@ -734,6 +754,10 @@
+ 			if (!sweet_surface_publish(s)) {
+ 				ret = kIOReturnNoResources;
+ 			}
++			if (!contiguous) {
++				IOLog("SWEET SURF: %ux%u %u bytes not physically contiguous\n",
++				    s->width, s->height, s->allocSize);
++			}
+ 		}
+ 	}
+ 	if (ret != kIOReturnSuccess || sweet_surface_creates_logged < 64) {
