@@ -170,8 +170,11 @@ static void paniclog_dump(void)
 		__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
 	__asm__ volatile("dsb sy" ::: "memory");
 
-		con_str("NOTE", "panic log shown; continuing boot");
+	con_str("NOTE", "panic log shown; power-cycle to boot again");
+	while (1) {
+		__asm__ volatile("wfi");
 	}
+}
 
 void gicv2_init(void)
 {
