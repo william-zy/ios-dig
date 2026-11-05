@@ -69,7 +69,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
  	setProperty("external", false);
-@@ -312,8 +316,35 @@
+@@ -312,9 +316,35 @@
  }
  
  void
@@ -102,11 +102,12 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +void
 +AppleCLCD::vsyncTick(void)
  {
+-	AppleCLCD *fb = (AppleCLCD *)owner;
 +	AppleCLCD *fb = this;
- 	AppleCLCD *fb = (AppleCLCD *)owner;
  	uint64_t now = mach_absolute_time();
  	uint64_t count = ++fb->fVsyncCount;
-@@ -349,7 +380,6 @@
+ 	uint64_t values[6] = {
+@@ -349,7 +379,6 @@
  			}
  #endif
  		}
@@ -114,7 +115,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  		return;
  	}
  	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
-@@ -366,7 +396,6 @@
+@@ -366,7 +395,6 @@
  		fb->present(rec);
  		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
  	}
@@ -122,7 +123,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  }
  
  void
-@@ -586,6 +615,7 @@
+@@ -586,6 +614,7 @@
  		return false;
  	}
  	fFB->addClient(this);
