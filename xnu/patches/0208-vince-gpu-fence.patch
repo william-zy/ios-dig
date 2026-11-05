@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
 --- a/bsd/dev/vince_adreno.c
 +++ b/bsd/dev/vince_adreno.c
-@@ -996,6 +996,14 @@
+@@ -997,6 +997,14 @@
  	return (int32_t)(cur - fence) >= 0;
  }
  
@@ -16,7 +16,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  bool
  vince_gpu_parameter(uint32_t which, uint64_t *value)
  {
-@@ -1060,7 +1068,7 @@
+@@ -1061,7 +1069,7 @@
  		return 0;
  	}
  
@@ -25,7 +25,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  
  	for (i = 0; i < count; i++) {
  		rb_emit(pkt7(CP_INDIRECT_BUFFER_PFE, 3));
-@@ -1073,12 +1081,25 @@
+@@ -1074,12 +1082,25 @@
  	if (gpu_fence == 0) {
  		gpu_fence = 1;
  	}
