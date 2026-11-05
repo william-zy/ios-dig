@@ -1,0 +1,20 @@
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+index 224e51a..7ff3ffc 100644
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -767,6 +767,7 @@ VinceGPUUserClient::sweetSubmit(const void *input, size_t length, uint64_t *sequ
+ 		return kIOReturnNoMemory;
+ 	}
+ 	IOReturn ret = kIOReturnSuccess;
++	uint32_t kept = 0;
+ 	for (uint32_t i = 0; i < nr_bos; i++) {
+ 		listed[i] = buffer(handles[i]);
+ 		if (listed[i] == NULL) {
+@@ -776,7 +777,6 @@ VinceGPUUserClient::sweetSubmit(const void *input, size_t length, uint64_t *sequ
+ 		/* CPU writes must be in memory before the GPU reads the buffers. */
+ 		flushBuffer(listed[i]);
+ 	}
+-	uint32_t kept = 0;
+ 	for (uint32_t i = 0; i < nr_ibs; i++) {
+ 		uint64_t address = (uint64_t)ibs[i].address_lo | ((uint64_t)ibs[i].address_hi << 32);
+ 		uint32_t count = ibs[i].size_words;
