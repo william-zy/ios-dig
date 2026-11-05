@@ -1,0 +1,160 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 5dbaaa3..6dfc8b3 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -165,9 +165,19 @@ extern void VinceGPUStart(void);
+ #define A5_CP_ME_INSTR_BASE_HI          0x0839
+ #define A5_CP_PROTECT0                  0x0880
+ #define A5_CP_PROTECT_CNTL              0x08a0
++#define A5_CP_PFP_STAT_ADDR             0x0808
++#define A5_CP_PFP_STAT_DATA             0x0809
+ #define A5_CP_INTERRUPT_STATUS          0x0b18
+ #define A5_CP_HW_FAULT                  0x0b1a
++#define A5_CP_AHB_FAULT                 0x0b1b
+ #define A5_CP_PROTECT_STATUS            0x0b1c
++#define A5_CP_IB1_BASE                  0x0b1f
++#define A5_CP_IB1_BASE_HI               0x0b20
++#define A5_CP_IB1_BUFSZ                 0x0b21
++#define A5_CP_IB2_BASE                  0x0b22
++#define A5_CP_IB2_BASE_HI               0x0b23
++#define A5_CP_IB2_BUFSZ                 0x0b24
++#define A5_RBBM_STATUS3                 0x0530
+ #define A5_CP_PERFCTR_CP_SEL_0          0x0bb0
+ #define A5_RB_DBG_ECO_CNTL              0x0cc4
+ #define A5_RB_MODE_CNTL                 0x0cc6
+@@ -1000,9 +1010,46 @@ vince_gpu_done(uint32_t fence)
+ void
+ vince_gpu_status(void)
+ {
+-	printf("adreno: RPTR=%u WPTR=%u RBBM=%#x INT0=%#x FAULT=%#x scratch=%#x\n",
+-		gr(A5_CP_RB_RPTR), rb_wptr, gr(A5_RBBM_STATUS), gr(A5_RBBM_INT_0_STATUS),
+-		gr(A5_CP_HW_FAULT), gmem_r32(GPU_SCRATCH_OFF + 0x20));
++	uint32_t stat = gr(A5_RBBM_INT_0_STATUS);
++	uint32_t cpint = gr(A5_CP_INTERRUPT_STATUS);
++	uint32_t opcode = 0;
++
++	if (cpint & 0x1u) {             /* CP_OPCODE_ERROR: PFP stat index 1 */
++		gw(A5_CP_PFP_STAT_ADDR, 0);
++		(void)gr(A5_CP_PFP_STAT_DATA);
++		opcode = gr(A5_CP_PFP_STAT_DATA);
++	}
++	printf("adreno: RPTR=%u WPTR=%u RBBM=%#x STATUS3=%#x INT0=%#x CPINT=%#x\n",
++		gr(A5_CP_RB_RPTR), rb_wptr, gr(A5_RBBM_STATUS), gr(A5_RBBM_STATUS3),
++		stat, cpint);
++	printf("adreno: FAULT=%#x AHB=%#x PROT=%#x opcode=%#x scratch=%#x\n",
++		gr(A5_CP_HW_FAULT), gr(A5_CP_AHB_FAULT), gr(A5_CP_PROTECT_STATUS),
++		opcode, gmem_r32(GPU_SCRATCH_OFF + 0x20));
++	printf("adreno: IB1=%#llx/%u IB2=%#llx/%u RB_CNTL=%#x ME_CNTL=%#x\n",
++		((unsigned long long)gr(A5_CP_IB1_BASE_HI) << 32) | gr(A5_CP_IB1_BASE),
++		gr(A5_CP_IB1_BUFSZ),
++		((unsigned long long)gr(A5_CP_IB2_BASE_HI) << 32) | gr(A5_CP_IB2_BASE),
++		gr(A5_CP_IB2_BUFSZ), gr(A5_CP_RB_CNTL), gr(A5_CP_PFP_ME_CNTL));
++	/* Fresh bits for the next submission. */
++	gw(A5_RBBM_INT_CLEAR_CMD, stat & ~0x2u);
++}
++
++/* First dwords of a client IB; only used while diagnosing submission. */
++static void
++dump_ib(uint64_t pa, uint32_t dwords)
++{
++	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), 0x2000);
++	uint32_t n = MIN(dwords, 24u);
++
++	if (va == 0) {
++		printf("adreno:  ib dump failed\n");
++		return;
++	}
++	printf("adreno:  ib words:");
++	for (uint32_t j = 0; j < n; j++) {
++		printf(" %#x", reg_read(va, (uint32_t)(pa & 0xfffu) + j * 4u));
++	}
++	printf("%s\n", dwords > n ? " ..." : "");
+ }
+ 
+ bool
+@@ -1086,7 +1133,7 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 	 * and stores the fence (CP_MEM_WRITE after CP_WAIT_MEM_WRITES never
+ 	 * updated the scratch word on this GPU). */
+ 	rb_emit(pkt7(CP_EVENT_WRITE, 4));
+-	rb_emit(0x04);                          /* CACHE_FLUSH_TS */
++	rb_emit(0x80000004u);                   /* CACHE_FLUSH_TS | IRQ */
+ 	rb_emit(GPU_MEM_PA + GPU_SCRATCH_OFF + 0x20);
+ 	rb_emit(0);
+ 	rb_emit(gpu_fence);
+@@ -1098,6 +1145,15 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 		for (uint32_t k = 0; k < count && k < 8; k++) {
+ 			printf("adreno:  ib %u pa %#llx dwords %u\n", k,
+ 				(unsigned long long)addresses[k], words[k]);
++			dump_ib(addresses[k], words[k]);
++		}
++	}
++
++	/* Stale error bits from the previous submit would hide this one's. */
++	{
++		uint32_t stale = gr(A5_RBBM_INT_0_STATUS);
++		if (stale != 0) {
++			gw(A5_RBBM_INT_CLEAR_CMD, stale & ~0x2u);
+ 		}
+ 	}
+ 
+@@ -1107,6 +1163,52 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 	return gpu_fence;
+ }
+ 
++/*
++ * Run a trivially valid IB through the same CP path a client IB takes.  If
++ * the scratch word and the timestamp arrive, CP_INDIRECT_BUFFER_PFE and the
++ * event write work, and a failing GPU submit is about its contents.
++ */
++static bool
++ib_selftest(void)
++{
++	const uint32_t ib_off = GPU_SCRATCH_OFF + 0x1000;
++	uint32_t ib[9];
++	uint32_t n = 0, mem, ts;
++
++	ib[n++] = pkt7(CP_MEM_WRITE, 3);
++	ib[n++] = GPU_MEM_PA + GPU_SCRATCH_OFF + 0x24;
++	ib[n++] = 0;
++	ib[n++] = 0xc0ffee03u;
++	ib[n++] = pkt7(CP_EVENT_WRITE, 4);
++	ib[n++] = 0x80000004u;
++	ib[n++] = GPU_MEM_PA + GPU_SCRATCH_OFF + 0x28;
++	ib[n++] = 0;
++	ib[n++] = 0x1234u;
++
++	gmem_w32(GPU_SCRATCH_OFF + 0x24, 0);
++	gmem_w32(GPU_SCRATCH_OFF + 0x28, 0);
++	for (uint32_t j = 0; j < n; j++) {
++		gmem_w32(ib_off + j * 4u, ib[j]);
++	}
++
++	gw(A5_RBBM_INT_CLEAR_CMD, gr(A5_RBBM_INT_0_STATUS));
++	rb_emit(pkt7(CP_INDIRECT_BUFFER_PFE, 3));
++	rb_emit(GPU_MEM_PA + ib_off);
++	rb_emit(0);
++	rb_emit(n);
++	if (!rb_flush("IB selftest")) {
++		printf("adreno: ib selftest: NOT consumed\n");
++		return false;
++	}
++	delay(10000);
++	mem = gmem_r32(GPU_SCRATCH_OFF + 0x24);
++	ts = gmem_r32(GPU_SCRATCH_OFF + 0x28);
++	printf("adreno: ib selftest: mem=%#x ts=%#x INT0=%#x CPINT=%#x RPTR=%u\n",
++		mem, ts, gr(A5_RBBM_INT_0_STATUS), gr(A5_CP_INTERRUPT_STATUS),
++		gr(A5_CP_RB_RPTR));
++	return mem == 0xc0ffee03u && ts == 0x1234u;
++}
++
+ static bool
+ step11_post_zap(void)
+ {
+@@ -1125,6 +1227,7 @@ step11_post_zap(void)
+ 	    got, gr(A5_RBBM_STATUS), gr(A5_RBBM_INT_0_STATUS), gr(A5_CP_RB_RPTR));
+ 	if (got == 0xc0ffee02u) {
+ 		printf("adreno: step 11: Adreno 506 command processor is up (ring at PA %#x)\n", GPU_MEM_PA + GPU_RB_OFF);
++		(void)ib_selftest();
+ 		gpu_ready = true;
+ 		VinceGPUStart();
+ 	}
