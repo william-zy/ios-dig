@@ -1,0 +1,108 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -50,6 +50,9 @@
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
+ #include <sys/proc.h>
++#include <kern/thread.h>
++
++extern int hz;
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+@@ -93,11 +96,12 @@
+ class AppleCLCD : public IOMobileFramebuffer {
+ 	OSDeclareDefaultStructors(AppleCLCD);
+ 
+-	IOWorkLoop         *fWorkLoop;
+-	IOTimerEventSource *fVsync;
++	thread_t            fVsyncThread;
+ 	uint64_t            fVsyncCount;
++	int                 fVsyncChan;
+ 
+-	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
++	static void vsyncThread(void *arg, wait_result_t wr);
++	void vsyncTick(void);
+ 
+ public:
+ 	uint64_t      fPhys;
+@@ -274,22 +278,27 @@
+ #endif
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
+-	fWorkLoop = IOWorkLoop::workLoop();
+-	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
++	if (fLock == NULL || fClients == NULL || fPixels == 0) {
+ 		IOLog("SWEET FB: setup failed\n");
+ 		OSSafeReleaseNULL(fSurface);    /* stays published: also held by the table */
+-		OSSafeReleaseNULL(fWorkLoop);
+ 		return false;
+ 	}
+-	fVsync = IOTimerEventSource::timerEventSource(this, &AppleCLCD::vsyncFired);
+-	if (fVsync == NULL || fWorkLoop->addEventSource(fVsync) != kIOReturnSuccess) {
+-		IOLog("SWEET FB: no vsync timer\n");
++	uint32_t fb_hz = 10;
++	PE_parse_boot_argn("sweetfb_hz", &fb_hz, sizeof(fb_hz));
++	fFlushTicks = (fb_hz == 0 || fb_hz >= 60) ? 1 : 60 / fb_hz;
++	/*
++	 * IOTimerEventSource never fired on this port (no work loop thread), so
++	 * the display link never ran and CA never presented.  A plain kernel
++	 * thread with tsleep is what the persistent-log thread already uses.
++	 */
++	fVsyncChan = 0;
++	thread_t vsync_thread;
++	if (kernel_thread_start(AppleCLCD::vsyncThread, this, &vsync_thread) != KERN_SUCCESS) {
++		IOLog("SWEET FB: no vsync thread\n");
+ 		return false;
+ 	}
+-	uint32_t hz = 10;
+-	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+-	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
+-	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
++	fVsyncThread = vsync_thread;
++	thread_deallocate(vsync_thread);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+@@ -312,9 +321,20 @@
+ }
+ 
+ void
+-AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
++AppleCLCD::vsyncThread(void *arg, __unused wait_result_t wr)
++{
++	AppleCLCD *fb = (AppleCLCD *)arg;
++
++	for (;;) {
++		tsleep(&fb->fVsyncChan, PZERO, "sweetvsync", MAX(1, hz / 60));
++		fb->vsyncTick();
++	}
++}
++
++void
++AppleCLCD::vsyncTick(void)
+ {
+-	AppleCLCD *fb = (AppleCLCD *)owner;
++	AppleCLCD *fb = this;
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
+ 	uint64_t values[6] = {
+@@ -349,8 +369,7 @@
+ 			}
+ #endif
+ 		}
+-		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+-		return;
++			return;
+ 	}
+ 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
+ 	uint8_t *rec = NULL;
+@@ -366,7 +385,6 @@
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+ 	}
+-	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ }
+ 
+ void
