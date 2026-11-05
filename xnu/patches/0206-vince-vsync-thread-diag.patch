@@ -1,0 +1,19 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -335,8 +335,14 @@
+ {
+ 	AppleCLCD *fb = (AppleCLCD *)arg;
+ 
++	int n = 0;
++
++	IOLog("SWEET FB: vsync thread running (hz %d)\n", hz);
+ 	for (;;) {
+-		tsleep(&fb->fVsyncChan, PZERO, "sweetvsync", MAX(1, hz / 60));
++		int kr = tsleep(&fb->fVsyncChan, PZERO, "sweetvsync", MAX(1, hz / 60));
++		if (n++ < 3) {
++			IOLog("SWEET FB: vsync sleep -> %d (n %d)\n", kr, n);
++		}
+ 		fb->vsyncTick();
+ 	}
+ }
