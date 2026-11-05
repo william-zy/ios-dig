@@ -1,7 +1,15 @@
 diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
 --- a/bsd/dev/vince_adreno.c
 +++ b/bsd/dev/vince_adreno.c
-@@ -997,6 +997,14 @@
+@@ -198,6 +198,7 @@
+ #define CP_WAIT_MEM_WRITES      18
+ #define CP_WAIT_FOR_IDLE        38
+ #define CP_INDIRECT_BUFFER_PFE  63
++#define CP_EVENT_WRITE          70
+ #define CP_SET_SECURE_MODE      102
+ 
+ #define A5XX_INT_MASK           0x1190037eu     /* a5xx_gpu.c A5XX_INT_MASK */
+@@ -996,6 +997,14 @@
  	return (int32_t)(cur - fence) >= 0;
  }
  
@@ -16,7 +24,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  bool
  vince_gpu_parameter(uint32_t which, uint64_t *value)
  {
-@@ -1061,7 +1069,7 @@
+@@ -1060,7 +1069,7 @@
  		return 0;
  	}
  
@@ -25,7 +33,7 @@ diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
  
  	for (i = 0; i < count; i++) {
  		rb_emit(pkt7(CP_INDIRECT_BUFFER_PFE, 3));
-@@ -1074,12 +1082,25 @@
+@@ -1073,12 +1082,25 @@
  	if (gpu_fence == 0) {
  		gpu_fence = 1;
  	}
