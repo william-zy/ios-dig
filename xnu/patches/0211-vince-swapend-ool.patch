@@ -1,0 +1,80 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index f185f45..4f69c61 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -451,6 +451,7 @@ get32(const uint8_t *p, uint32_t off)
+ }
+ 
+ static uint32_t sweet_fb_swaps_logged;
++static bool sweet_fb_swepend_logged;
+ static uint64_t sweet_fb_swap_count;
+ 
+ /* Copy each enabled layer's surface into the panel memory (no scaling). */
+@@ -728,12 +729,29 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 		break;
+ 	case kSweetFBSwapEnd: {
+ 		uint8_t rec[SWEET_FB_SWAP_REC_SIZE];
+-		if (args->structureInputDescriptor != NULL ||
++		bool ool = args->structureInputDescriptor != NULL;
++
++		/* 0x46c is over the inline limit, so CA may hand it to us OOL. */
++		if (ool) {
++			if (args->structureInputDescriptor->getLength() < SWEET_FB_SWAP_REC_SIZE ||
++			    args->structureInputDescriptor->readBytes(0, rec, sizeof(rec)) != sizeof(rec)) {
++				ret = kIOReturnBadArgument;
++				break;
++			}
++		} else if (args->structureInput == NULL ||
+ 		    args->structureInputSize < SWEET_FB_SWAP_REC_SIZE) {
+ 			ret = kIOReturnBadArgument;
+ 			break;
++		} else {
++			memcpy(rec, args->structureInput, sizeof(rec));
++		}
++		if (!sweet_fb_swepend_logged) {
++			sweet_fb_swepend_logged = true;
++			IOLog("SWEET FB: SwapEnd via %s (%u bytes)\n",
++			    ool ? "OOL descriptor" : "inline input",
++			    (unsigned)(ool ? args->structureInputDescriptor->getLength()
++			        : args->structureInputSize));
+ 		}
+-		memcpy(rec, args->structureInput, sizeof(rec));
+ 		fFB->swap(rec);
+ 		break;
+ 	}
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+index a8deb73..224e51a 100644
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -268,7 +268,7 @@ private:
+ 	bool fLoggedInfo;
+ 	bool fLoggedNew;
+ 	bool fLoggedSubmit;
+-	bool fLoggedEmptyIb;
++	uint32_t fEmptyIbsLogged;
+ };
+ 
+ OSDefineMetaClassAndStructors(VinceGPUUserClient, IOUserClient);
+@@ -285,7 +285,7 @@ VinceGPUUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 typ
+ 	fLoggedInfo = false;
+ 	fLoggedNew = false;
+ 	fLoggedSubmit = false;
+-	fLoggedEmptyIb = false;
++	fEmptyIbsLogged = 0;
+ 	fBuffers = (struct gpu_buffer *)IOMallocZero(sizeof(struct gpu_buffer) * GPU_BUFFERS);
+ 	if (fBuffers != NULL) {
+ 		char name[32];
+@@ -796,9 +796,10 @@ VinceGPUUserClient::sweetSubmit(const void *input, size_t length, uint64_t *sequ
+ 			goto out;
+ 		}
+ 		if (sweetIbEmpty(owner, address, count)) {
+-			if (!fLoggedEmptyIb) {
+-				fLoggedEmptyIb = true;
+-				IOLog("VinceGPU: dropping empty IB %u (%u dwords)\n", i, count);
++			if (fEmptyIbsLogged < 16) {
++				fEmptyIbsLogged++;
++				IOLog("VinceGPU: dropping empty IB %u at %#llx (%u dwords)\n",
++				    i, (unsigned long long)address, count);
+ 			}
+ 			continue;
+ 		}
