@@ -1,0 +1,100 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -808,6 +808,23 @@
+ 	}
+ }
+ 
++static bool
++sweet_struct_in(IOExternalMethodArguments *args, void *buf, uint32_t len)
++{
++	if (args->structureInputDescriptor != NULL) {
++		if (len > args->structureInputDescriptor->getLength()) {
++			return false;
++		}
++		args->structureInputDescriptor->readBytes(0, buf, len);
++		return true;
++	}
++	if (args->structureInput == NULL || len > args->structureInputSize) {
++		return false;
++	}
++	memcpy(buf, args->structureInput, len);
++	return true;
++}
++
+ static IOReturn
+ sweet_struct_out(IOExternalMethodArguments *args, const void *buf, uint32_t len)
+ {
+@@ -961,20 +978,63 @@
+ 		sweet_surf_log_once("sel", selector);
+ 		return sweet_struct_out(args, limits, sizeof(limits));
+ 	}
+-	case 6:        /* IOSurfaceClientWrapClientImage */
+-	case 7: {      /* IOSurfaceClientWrapClientMemory */
++	case 6: {      /* IOSurfaceClientWrapClientImage: client memory -> surface */
++		uint8_t d[0x20];
++		uint64_t addr;
++		uint32_t w, h, fourcc, bpe, pitch, size;
++		char name[32];
++		/* descriptor: {u64 addr; u32 width, height, fourcc, bpe, pitch, size} */
++		if (!sweet_struct_in(args, d, sizeof(d))) {
++			return kIOReturnBadArgument;
++		}
++		memcpy(&addr, d, sizeof(addr));
++		memcpy(&w, d + 8, 4);
++		memcpy(&h, d + 12, 4);
++		memcpy(&fourcc, d + 16, 4);
++		memcpy(&bpe, d + 20, 4);
++		memcpy(&pitch, d + 24, 4);
++		memcpy(&size, d + 28, 4);
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET SURF: %s wrap %llx %ux%u fmt %#x bpe %u pitch %u size %u\n",
++			name, (unsigned long long)addr, w, h, fourcc, bpe, pitch, size);
++		if (addr == 0 || w == 0 || h == 0 ||
++		    w > SWEET_SURFACE_MAX_DIM || h > SWEET_SURFACE_MAX_DIM ||
++		    bpe == 0 || pitch < w * bpe || size < (uint64_t)pitch * h ||
++		    size > SWEET_SURFACE_MAX_ALLOC) {
++			return kIOReturnBadArgument;
++		}
++		SweetSurface *s = sweet_surface_alloc();
++		if (s == NULL) {
++			return kIOReturnNoMemory;
++		}
++		s->width = w;
++		s->height = h;
++		s->pixelFormat = fourcc;
++		s->bytesPerElement = (uint16_t)bpe;
++		s->elementWidth = s->elementHeight = 1;
++		s->bytesPerRow = pitch;
++		s->allocSize = (uint32_t)round_page(size);
++		s->parentID = args->scalarInputCount > 0 ? (uint32_t)args->scalarInput[0] : 0;
++		/* The caller owns the pixels: wrap its buffer, do not take a pool slot. */
++		s->memory = IOMemoryDescriptor::withAddressRange(addr, s->allocSize,
++			kIODirectionInOut, fTask);
++		s->mapCache = kIOMapDefaultCache;
++		if (s->memory == NULL || !sweet_surface_publish(s)) {
++			s->release();
++			return kIOReturnNoMemory;
++		}
++		IOReturn ret = returnSurface(s, args);
++		s->release();
++		return ret;
++	}
++	case 7: {      /* IOSurfaceClientWrapClientMemory: ABI not known yet */
+ 		char name[32];
+ 		proc_selfname(name, sizeof(name));
+ 		if (args->structureInput != NULL && args->structureInputSize >= 0x20) {
+ 			const uint32_t *p = (const uint32_t *)args->structureInput;
+-			IOLog("SWEET SURF: %s sel %u wrap %08x %08x %08x %08x %08x %08x %08x %08x\n",
+-				name, selector, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+-		} else {
+-			IOLog("SWEET SURF: %s sel %u wrap no descriptor (\%u bytes)\n",
+-				name, selector, args->structureInputSize);
++			IOLog("SWEET SURF: %s sel 7 wrap %08x %08x %08x %08x %08x %08x %08x %08x\n",
++				name, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+ 		}
+-		/* No client-owned image support: a zeroed lock result builds a
+-		 * client with a NULL state page and CA crashes in memmove. */
+ 		return kIOReturnUnsupported;
+ 	}
+ 	case kSweetSurfaceCreate:
