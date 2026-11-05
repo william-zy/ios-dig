@@ -1,0 +1,75 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -996,6 +996,14 @@
+ 	return (int32_t)(cur - fence) >= 0;
+ }
+ 
++void
++vince_gpu_status(void)
++{
++	printf("adreno: RPTR=%u WPTR=%u RBBM=%#x INT0=%#x FAULT=%#x scratch=%#x\n",
++		gr(A5_CP_RB_RPTR), rb_wptr, gr(A5_RBBM_STATUS), gr(A5_RBBM_INT_0_STATUS),
++		gr(A5_CP_HW_FAULT), gmem_r32(GPU_SCRATCH_OFF + 0x20));
++}
++
+ bool
+ vince_gpu_parameter(uint32_t which, uint64_t *value)
+ {
+@@ -1060,7 +1068,7 @@
+ 		return 0;
+ 	}
+ 
+-	rb_emit(pkt7(CP_WAIT_FOR_IDLE, 0));
++	static int submits_logged;
+ 
+ 	for (i = 0; i < count; i++) {
+ 		rb_emit(pkt7(CP_INDIRECT_BUFFER_PFE, 3));
+@@ -1073,12 +1081,25 @@
+ 	if (gpu_fence == 0) {
+ 		gpu_fence = 1;
+ 	}
+-	rb_emit(pkt7(CP_WAIT_MEM_WRITES, 0));
+-	rb_emit(pkt7(CP_MEM_WRITE, 3));
++	/* freedreno fence: CP_EVENT_WRITE/CACHE_FLUSH_TS flushes the CP writes
++	 * and stores the fence (CP_MEM_WRITE after CP_WAIT_MEM_WRITES never
++	 * updated the scratch word on this GPU). */
++	rb_emit(pkt7(CP_EVENT_WRITE, 4));
++	rb_emit(0x04);                          /* CACHE_FLUSH_TS */
+ 	rb_emit(GPU_MEM_PA + GPU_SCRATCH_OFF + 0x20);
+ 	rb_emit(0);
+ 	rb_emit(gpu_fence);
+ 
++	if (submits_logged < 3) {
++		submits_logged++;
++		printf("adreno: submit %d: %u IBs fence %u RPTR=%u WPTR=%u\n",
++			submits_logged, count, gpu_fence, gr(A5_CP_RB_RPTR), rb_wptr);
++		for (uint32_t k = 0; k < count && k < 8; k++) {
++			printf("adreno:  ib %u pa %#llx dwords %u\n", k,
++				(unsigned long long)addresses[k], words[k]);
++		}
++	}
++
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	gw(A5_CP_RB_WPTR, rb_wptr);
+ 
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -26,6 +26,7 @@
+ uint32_t vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count);
+ bool vince_gpu_done(uint32_t fence);
+ uint32_t vince_gpu_last(void);
++void vince_gpu_status(void);
+ void VinceGPUStart(void);
+ void VinceGPUStop(void);
+ void flush_dcache64(addr64_t addr, unsigned count, int phys);
+@@ -172,7 +173,7 @@
+ 		if ((int64_t)elapsedMs >= patienceMs) {
+ 			bool done = vince_gpu_done(fence);
+ 			if (!done) {
+-				IOLog("VinceGPU: fence %u timed out after %lld ms\n", fence, patienceMs);
++				vince_gpu_status();
+ 			}
+ 			return done;
+ 		}
