@@ -1,0 +1,124 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 6dfc8b3..d0c3916 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1099,7 +1099,7 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 	uint32_t needed = count * 4 + 8;
+ 	uint32_t i;
+ 
+-	if (!gpu_ready || count == 0) {
++	if (!gpu_ready) {
+ 		return 0;
+ 	}
+ 
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+index 903fa40..a8deb73 100644
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -268,6 +268,7 @@ private:
+ 	bool fLoggedInfo;
+ 	bool fLoggedNew;
+ 	bool fLoggedSubmit;
++	bool fLoggedEmptyIb;
+ };
+ 
+ OSDefineMetaClassAndStructors(VinceGPUUserClient, IOUserClient);
+@@ -284,6 +285,7 @@ VinceGPUUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 typ
+ 	fLoggedInfo = false;
+ 	fLoggedNew = false;
+ 	fLoggedSubmit = false;
++	fLoggedEmptyIb = false;
+ 	fBuffers = (struct gpu_buffer *)IOMallocZero(sizeof(struct gpu_buffer) * GPU_BUFFERS);
+ 	if (fBuffers != NULL) {
+ 		char name[32];
+@@ -705,6 +707,34 @@ VinceGPUUserClient::sweetGemImport(uint32_t surfaceID, uint64_t *out)
+ 	return kIOReturnSuccess;
+ }
+ 
++/*
++ * CA's first submit carries an indirect buffer that is still all zeroes (a
++ * fence-only submit).  The CP does not treat a PM4 type 0 word as a NOP: it
++ * raises CP_OPCODE_ERROR and the context never runs again, which is exactly
++ * what kept the first frame from reaching the panel.  Drop those buffers and
++ * submit only the fence.
++ */
++static bool
++sweetIbEmpty(const struct gpu_buffer *b, uint64_t address, uint32_t dwords)
++{
++	uint32_t buf[16];
++	uint64_t off = address - b->address;
++
++	for (uint32_t i = 0; i < dwords; ) {
++		uint32_t n = dwords - i < 16 ? dwords - i : 16;
++		if (b->memory->readBytes(off + (uint64_t)i * 4u, buf, n * 4u) != n * 4u) {
++			return false;
++		}
++		for (uint32_t j = 0; j < n; j++) {
++			if (buf[j] != 0) {
++				return false;
++			}
++		}
++		i += n;
++	}
++	return true;
++}
++
+ IOReturn
+ VinceGPUUserClient::sweetSubmit(const void *input, size_t length, uint64_t *sequence)
+ {
+@@ -746,34 +776,46 @@ VinceGPUUserClient::sweetSubmit(const void *input, size_t length, uint64_t *sequ
+ 		/* CPU writes must be in memory before the GPU reads the buffers. */
+ 		flushBuffer(listed[i]);
+ 	}
++	uint32_t kept = 0;
+ 	for (uint32_t i = 0; i < nr_ibs; i++) {
+ 		uint64_t address = (uint64_t)ibs[i].address_lo | ((uint64_t)ibs[i].address_hi << 32);
+ 		uint32_t count = ibs[i].size_words;
+-		bool owned = false;
++		struct gpu_buffer *owner = NULL;
+ 
+ 		if (count == 0 || (address & 3) || count > GPU_BUFFER_MAX / 4) {
+ 			ret = kIOReturnBadArgument;
+ 			goto out;
+ 		}
+-		for (uint32_t j = 0; j < nr_bos && !owned; j++) {
+-			owned = contains(listed[j], address, (uint64_t)count * 4);
++		for (uint32_t j = 0; j < nr_bos && owner == NULL; j++) {
++			if (contains(listed[j], address, (uint64_t)count * 4)) {
++				owner = listed[j];
++			}
+ 		}
+-		if (!owned) {
++		if (owner == NULL) {
+ 			ret = kIOReturnNotPermitted;
+ 			goto out;
+ 		}
+-		addresses[i] = address;
+-		words[i] = count;
++		if (sweetIbEmpty(owner, address, count)) {
++			if (!fLoggedEmptyIb) {
++				fLoggedEmptyIb = true;
++				IOLog("VinceGPU: dropping empty IB %u (%u dwords)\n", i, count);
++			}
++			continue;
++		}
++		addresses[kept] = address;
++		words[kept] = count;
++		kept++;
+ 	}
+-	seq = vince_gpu_submit(addresses, words, nr_ibs);
++	seq = vince_gpu_submit(addresses, words, kept);
+ 	if (seq == 0) {
+-		IOLog("VinceGPU: submit %u IBs failed\n", nr_ibs);
++		IOLog("VinceGPU: submit %u IBs failed\n", kept);
+ 		ret = kIOReturnNotReady;
+ 		goto out;
+ 	}
+ 	if (!fLoggedSubmit) {
+ 		fLoggedSubmit = true;
+-		IOLog("VinceGPU: first submit %u IBs, %u BOs -> seq %u\n", nr_ibs, nr_bos, seq);
++		IOLog("VinceGPU: first submit %u IBs (%u empty), %u BOs -> seq %u\n",
++		    kept, nr_ibs - kept, nr_bos, seq);
+ 	}
+ 	for (uint32_t i = 0; i < nr_bos; i++) {
+ 		listed[i]->lastFence = seq;
