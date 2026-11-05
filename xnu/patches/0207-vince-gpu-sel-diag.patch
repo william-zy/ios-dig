@@ -1,0 +1,157 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -294,6 +294,7 @@
+ 	 */
+ 	fVsyncThread = NULL;
+ 	fVsyncChan = 0;
++	fVsyncCount = 0;
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+@@ -353,25 +354,54 @@
+ 	AppleCLCD *fb = this;
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
++	IOMobileFramebufferUserClient *clients[8];
++	uint32_t nclients = 0;
++	bool poweroff, flush = false;
++	uint32_t step = 0;
++	uint8_t *rec = NULL;
+ 	uint64_t values[6] = {
+ 		(uint32_t)count, (uint32_t)(count >> 32),
+ 		(uint32_t)now, (uint32_t)(now >> 32),
+ 		0, 0,
+ 	};
+ 
++	if (count <= 3) {
++		IOLog("SWEET FB: vsync %llu\n", count);
++	}
+ 	IOLockLock(fb->fLock);
+-	for (unsigned int i = 0; i < fb->fClients->getCount(); i++) {
++	for (unsigned int i = 0; i < fb->fClients->getCount() && nclients < 8; i++) {
+ 		IOMobileFramebufferUserClient *client =
+-		    (IOMobileFramebufferUserClient *)fb->fClients->getObject(i);
+-		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
++			(IOMobileFramebufferUserClient *)fb->fClients->getObject(i);
++		if (client != NULL) {
++			client->retain();
++			clients[nclients++] = client;
++		}
++	}
++	poweroff = fb->fPowerOff;
++	step = fb->fFadeStep;
++	if (poweroff && step <= 6) {
++		fb->fFadeStep = step + 1;
++	}
++	if (!poweroff) {
++		flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
++		if (flush) {
++			rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
++			if (rec != NULL) {
++				memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
++				fb->fDirty = false;
++			}
++		}
+ 	}
+-	if (fb->fPowerOff) {
++	IOLockUnlock(fb->fLock);
++
++	/* Notify outside fLock: the mach send can block on a full queue, and
++	 * blocking here would deadlock a client busy in SwapBegin/SwapEnd. */
++	for (uint32_t i = 0; i < nclients; i++) {
++		clients[i]->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
++		clients[i]->release();
++	}
++	if (poweroff) {
+ 		/* Fade out: halve every channel each vsync, then black, then idle. */
+-		uint32_t step = fb->fFadeStep;
+-		if (step <= 6) {
+-			fb->fFadeStep = step + 1;
+-		}
+-		IOLockUnlock(fb->fLock);
+ 		if (step <= 6) {
+ 			for (uint32_t y = 0; y < fb->fShadowH; y++) {
+ 				volatile uint32_t *row = (volatile uint32_t *)(fb->fPixels + (uint64_t)y * fb->fRowBytes);
+@@ -387,16 +417,6 @@
+ 		}
+ 		return;
+ 	}
+-	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
+-	uint8_t *rec = NULL;
+-	if (flush) {
+-		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+-		if (rec != NULL) {
+-			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
+-			fb->fDirty = false;
+-		}
+-	}
+-	IOLockUnlock(fb->fLock);
+ 	if (rec != NULL) {
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+@@ -661,16 +681,29 @@
+ IOMobileFramebufferUserClient::notify(uint32_t type, const uint64_t *values, uint32_t count)
+ {
+ 	OSAsyncReference64 ref;
++	mach_port_t port;
++	io_user_reference_t func, refcon;
+ 
+-	if (type >= SWEET_FB_NOTIFY_TYPES || fFunc[type] == 0 || fPort == MACH_PORT_NULL) {
++	if (type >= SWEET_FB_NOTIFY_TYPES) {
++		return;
++	}
++	IOLockLock(fFB->fLock);
++	port = fPort;
++	func = fFunc[type];
++	refcon = fRefcon[type];
++	IOLockUnlock(fFB->fLock);
++	if (func == 0 || port == MACH_PORT_NULL) {
+ 		return;
+ 	}
+ 	bzero(ref, sizeof(ref));
+-	setAsyncReference64(ref, fPort, (mach_vm_address_t)fFunc[type], fRefcon[type], fTask);
++	setAsyncReference64(ref, port, (mach_vm_address_t)func, refcon, fTask);
++	/* CanDrop still blocks inside the kernel when the queue is full, so
++	 * callers must not hold fLock across this. */
+ 	sendAsyncResult64WithOptions(ref, kIOReturnSuccess, (io_user_reference_t *)values, count,
+-	    kIOUserNotifyOptionCanDrop);
++		kIOUserNotifyOptionCanDrop);
+ }
+ 
++
+ static uint64_t sweet_fb_logged;        /* selectors already logged (< 64) */
+ 
+ IOReturn
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -170,7 +170,11 @@
+ 		absolutetime_to_nanoseconds(mach_absolute_time() - start, &elapsedNs);
+ 		elapsedMs = elapsedNs / NSEC_PER_MSEC;
+ 		if ((int64_t)elapsedMs >= patienceMs) {
+-			return vince_gpu_done(fence);
++			bool done = vince_gpu_done(fence);
++			if (!done) {
++				IOLog("VinceGPU: fence %u timed out after %lld ms\n", fence, patienceMs);
++			}
++			return done;
+ 		}
+ 		IOSleep(1);
+ 	}
+@@ -842,6 +846,15 @@
+ 	if (!vince_gpu_ready()) {
+ 		return kIOReturnNotReady;
+ 	}
++	{
++		static uint32_t sel_logged[32];
++		if (selector < 32 && sel_logged[selector] < 40) {
++			sel_logged[selector]++;
++			IOLog("VinceGPU: sel %u in %u/%u out %u/%u\n", selector,
++				args->scalarInputCount, args->structureInputSize,
++				args->scalarOutputCount, args->structureOutputSize);
++		}
++	}
+ 
+ 	/*
+ 	 * Scalar selectors used by tools/sweetgl's libdrm emulation.  Wait is
