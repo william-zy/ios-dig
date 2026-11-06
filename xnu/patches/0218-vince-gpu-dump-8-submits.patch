@@ -1,0 +1,13 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index e095833..90609cb 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1295,7 +1295,7 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 	rb_emit(0);
+ 	rb_emit(gpu_fence);
+ 
+-	if (submits_logged < 3) {
++	if (submits_logged < 8) {
+ 		submits_logged++;
+ 		printf("adreno: submit %d: %u IBs fence %u RPTR=%u WPTR=%u\n",
+ 			submits_logged, count, gpu_fence, gr(A5_CP_RB_RPTR), rb_wptr);
