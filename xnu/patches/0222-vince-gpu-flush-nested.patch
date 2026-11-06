@@ -1,0 +1,70 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 9450f2f..526530b 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1113,38 +1113,32 @@ dump_ib_window(uint64_t pa, uint32_t dwords, uint32_t at, const char *what)
+ static void
+ dump_nested_ibs(uint64_t pa, uint32_t dwords)
+ {
+-	uint32_t n = MIN(dwords, 512u);
++	uint32_t n = MIN(dwords, 1024u);
+ 	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)n * 4u);
+ 	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), (bytes + 0xfffu) & ~(vm_size_t)0xfffu);
+ 	uint32_t off = (uint32_t)(pa & 0xfffu);
+-	uint32_t j = 0;
+ 
+ 	if (va == 0) {
+ 		return;
+ 	}
+-	while (j < n) {
++	/* Check every word: a packet walk can be thrown off by the type-0
++	 * count encoding, and then the indirect packet is never seen. */
++	for (uint32_t j = 0; j + 4 <= n; j++) {
+ 		uint32_t h = reg_read(va, off + j * 4u);
+ 
+-		if ((h & 0x70000000u) == 0x70000000u) {
+-			uint32_t cnt = h & 0x3fffu;
+-			uint32_t op = (h >> 16) & 0x7fu;
+-
+-			if (op == CP_INDIRECT_BUFFER_PFE && cnt >= 3 && j + 4 <= n) {
+-				uint64_t np = reg_read(va, off + (j + 1) * 4u) |
+-				    ((uint64_t)reg_read(va, off + (j + 2) * 4u) << 32);
+-				uint32_t nw = reg_read(va, off + (j + 3) * 4u);
+-
+-				if (nw >= 1 && nw <= 4096) {
+-					printf("adreno:  nested ib at %u: pa %#llx dwords %u\n",
+-					    j, (unsigned long long)np, nw);
+-					dump_ib_words(np, nw);
+-				}
++		if ((h & 0x7f000000u) == 0x70000000u &&
++		    ((h >> 16) & 0x7fu) == CP_INDIRECT_BUFFER_PFE &&
++		    (h & 0x3fffu) == 3u) {
++			uint64_t np = reg_read(va, off + (j + 1) * 4u) |
++			    ((uint64_t)reg_read(va, off + (j + 2) * 4u) << 32);
++			uint32_t nw = reg_read(va, off + (j + 3) * 4u);
++
++			if ((np >> 32) == 0 && np >= 0x40000000ull &&
++			    nw >= 4 && nw <= 65535u) {
++				printf("adreno:  nested ib at %u: pa %#llx dwords %u\n",
++				    j, (unsigned long long)np, nw);
++				dump_ib_words(np, nw);
+ 			}
+-			j += cnt + 1;
+-		} else if ((h & 0xc0000000u) == 0x40000000u) {
+-			j += (h & 0x7fu) + 1;
+-		} else {
+-			j++;
+ 		}
+ 	}
+ }
+@@ -1209,9 +1203,7 @@ sanitize_ib_depth(uint64_t pa, uint32_t dwords, int depth)
+ 			}
+ 		}
+ 	}
+-	if (fixed != 0) {
+-		flush_dcache64((addr64_t)pa, (unsigned)(dwords * 4u), TRUE);
+-	}
++	flush_dcache64((addr64_t)pa, (unsigned)(dwords * 4u), TRUE);
+ 	return fixed;
+ }
+ 
