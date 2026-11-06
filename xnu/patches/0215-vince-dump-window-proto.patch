@@ -1,0 +1,13 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 8044821..565d78b 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1013,6 +1013,8 @@ vince_gpu_done(uint32_t fence)
+ 	return (int32_t)(cur - fence) >= 0;
+ }
+ 
++static void dump_ib_window(uint64_t pa, uint32_t dwords, uint32_t at, const char *what);
++
+ void
+ vince_gpu_status(void)
+ {
