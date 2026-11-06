@@ -1,0 +1,42 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 666aee8..2961587 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1063,6 +1063,16 @@ vince_gpu_status(void)
+ 		    gr(A5_CP_IB2_BUFSZ), gr(A5_CP_RB_CNTL), gr(A5_CP_PFP_ME_CNTL));
+ 		printf("adreno: PFPSTAT=%#x %#x %#x %#x %#x %#x %#x %#x\n",
+ 		    pfp[0], pfp[1], pfp[2], pfp[3], pfp[4], pfp[5], pfp[6], pfp[7]);
++		{
++			uint32_t rptr = gr(A5_CP_RB_RPTR);
++			uint32_t start = (rptr + 8192u - 32u) % 8192u;
++
++			printf("adreno: ring around RPTR=%u:", rptr);
++			for (uint32_t k = 0; k < 64; k++) {
++				printf(" %#x", gmem_r32(GPU_RB_OFF + ((start + k) % 8192u) * 4u));
++			}
++			printf("\n");
++		}
+ 		for (uint32_t i = 0; i < ib_track_count; i++) {
+ 			if (ib_track_pa[i] == ib1 && bufsz <= ib_track_words[i]) {
+ 				dump_ib_window(ib1, ib_track_words[i],
+@@ -1180,6 +1190,11 @@ sanitize_ib_depth(uint64_t pa, uint32_t dwords, int depth)
+ 		} else if (h == 0xffffffffu) {
+ 			reg_write(va, off + j * 4u, 0x70108000u); /* pkt7(CP_NOP, 0) */
+ 			printf("adreno: sanitize stray 0xffffffff at %u/%u (depth %d)\n", j, n, depth);
++			printf(" ctx:");
++			for (uint32_t k = (j > 4 ? j - 4 : 0); k < MIN(j + 5, n); k++) {
++				printf(" %#x", reg_read(va, off + k * 4u));
++			}
++			printf("\n");
+ 			fixed++;
+ 			j++;
+ 		} else {
+@@ -1463,7 +1478,7 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 	rb_emit(0);
+ 	rb_emit(gpu_fence);
+ 
+-	if (submits_logged < 16) {
++	if (submits_logged < 24) {
+ 		submits_logged++;
+ 		printf("adreno: submit %d: %u IBs fence %u shadow %d RPTR=%u WPTR=%u\n",
+ 			submits_logged, count, gpu_fence, use_copy ? (int)shadow_slot : -1,
