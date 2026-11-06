@@ -1,0 +1,25 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 2961587..8c8ed7e 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1407,7 +1407,7 @@ shadow_prepare(const uint64_t *addresses, const uint32_t *words, uint32_t count,
+ uint32_t
+ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
+ {
+-	uint32_t needed = count * 4 + 16;
++	uint32_t needed = count * 4 + 22;
+ 	uint64_t copy_pa[IB_TRACK];
+ 	uint32_t shadow_slot = 0;
+ 	bool use_copy = false;
+@@ -1448,6 +1448,11 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 
+ 	use_copy = shadow_prepare(addresses, words, count, copy_pa, &shadow_slot);
+ 
++	/* Mesa's wrapper IBs start in render mode 1; a flat draw/state IB has no
++	 * such packet, so set it here for the whole submission. */
++	rb_emit(pkt7(CP_SET_RENDER_MODE, 5));
++	rb_emit(1); rb_emit(0); rb_emit(0); rb_emit(0); rb_emit(0);
++
+ 	for (i = 0; i < count; i++) {
+ 		uint64_t addr = use_copy ? copy_pa[i] : addresses[i];
+ 
