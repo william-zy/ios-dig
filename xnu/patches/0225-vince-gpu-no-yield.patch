@@ -1,0 +1,23 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index e4cebac..666aee8 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1446,13 +1446,13 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 	if (gpu_fence == 0) {
+ 		gpu_fence = 1;
+ 	}
+-	/* Linux a5xx submits end with render-mode NULL and YIELD_ENABLE; without
+-	 * it the CP keeps the render/binning state across submissions and the
+-	 * next flat draw stream is parsed in the wrong mode. */
++	/* Render-mode NULL tells the CP this IB is done rendering (without it the
++	 * mode leaks into the next submission and flat draw streams fail).  Do
++	 * not enable yielding: we have one context and no CONTEXT_SWITCH_YIELD
++	 * handshake, and preemption left the CP in a bad state after a few
++	 * submissions. */
+ 	rb_emit(pkt7(CP_SET_RENDER_MODE, 5));
+ 	rb_emit(0); rb_emit(0); rb_emit(0); rb_emit(0); rb_emit(0);
+-	rb_emit(pkt7(CP_YIELD_ENABLE, 1));
+-	rb_emit(0x01);
+ 
+ 	/* freedreno fence: CP_EVENT_WRITE/CACHE_FLUSH_TS flushes the CP writes
+ 	 * and stores the fence (CP_MEM_WRITE after CP_WAIT_MEM_WRITES never
