@@ -1,0 +1,27 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index b86aef3..e095833 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1267,6 +1267,14 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 		ib_track_words[i] = words[i];
+ 	}
+ 
++	/* Every submit, not just the first three: the stray word can appear at
++	 * any frame, and a single one wedges the CP for the rest of the boot. */
++	for (i = 0; i < count; i++) {
++		if (sanitize_ib(addresses[i], words[i]) != 0) {
++			flush_dcache64((addr64_t)addresses[i], (unsigned)(words[i] * 4u), TRUE);
++		}
++	}
++
+ 	for (i = 0; i < count; i++) {
+ 		rb_emit(pkt7(CP_INDIRECT_BUFFER_PFE, 3));
+ 		rb_emit((uint32_t)addresses[i]);
+@@ -1295,7 +1303,6 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 			printf("adreno:  ib %u pa %#llx dwords %u\n", k,
+ 				(unsigned long long)addresses[k], words[k]);
+ 			dump_ib(addresses[k], words[k]);
+-			sanitize_ib(addresses[k], words[k]);
+ 		}
+ 	}
+ 
