@@ -1,0 +1,38 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 5d392cd..e4cebac 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -855,6 +855,11 @@ step8_ucode_ring(void)
+ 	}
+ 	gmem_w32(GPU_SCRATCH_OFF, 0xdeaddeadu);
+ 	gmem_w32(GPU_SCRATCH_OFF + 4, 0xdeaddeadu);
++	/* These survive a warm reboot; a stale fence would make every wait pass
++	 * immediately and let clients read/present before the GPU is done. */
++	gmem_w32(GPU_SCRATCH_OFF + 0x20, 0);
++	gmem_w32(GPU_SCRATCH_OFF + 0x24, 0);
++	gmem_w32(GPU_SCRATCH_OFF + 0x28, 0);
+ 	rb_wptr = 0;
+ 
+ 	gw(A5_CP_ME_INSTR_BASE_LO, GPU_MEM_PA + GPU_PM4_OFF);
+@@ -1328,11 +1333,21 @@ static bool
+ shadow_prepare(const uint64_t *addresses, const uint32_t *words, uint32_t count,
+     uint64_t *copy_pa, uint32_t *out_slot)
+ {
++	static int shadow_enabled = -1;
+ 	uint32_t slot = 0, used = 0;
+ 	bool found = false;
+ 	vm_offset_t va;
+ 	uint64_t slot_pa;
+ 
++	if (shadow_enabled < 0) {
++		shadow_enabled = 0;
++		PE_parse_boot_argn("gpushadow", &shadow_enabled, sizeof(shadow_enabled));
++		printf("adreno: gpu shadow %s by boot-arg\n",
++		    shadow_enabled ? "enabled" : "disabled");
++	}
++	if (!shadow_enabled) {
++		return false;
++	}
+ 	if (gpu_shadow_pa == 0) {
+ 		gpu_shadow_pa = sweet_pixels_alloc(GPU_SHADOW_SIZE);
+ 		printf("adreno: gpu shadow %s at %#llx\n",
