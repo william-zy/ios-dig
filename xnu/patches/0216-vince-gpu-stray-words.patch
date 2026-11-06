@@ -1,0 +1,111 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 565d78b..b86aef3 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1078,11 +1078,14 @@ dump_ib_words(uint64_t pa, uint32_t dwords)
+ 		printf("adreno:  ib dump failed (pa %#llx)\n", (unsigned long long)pa);
+ 		return;
+ 	}
+-	printf("adreno:  ib words (%u of %u):", n, dwords);
++	printf("adreno:  ib[begin] pa %#llx dwords %u\n", (unsigned long long)pa, dwords);
+ 	for (uint32_t j = 0; j < n; j++) {
+-		printf(" %#x", reg_read(va, (uint32_t)(pa & 0xfffu) + j * 4u));
++		printf("adreno:  ib[%u]=%#x\n", j,
++		    reg_read(va, (uint32_t)(pa & 0xfffu) + j * 4u));
++	}
++	if (dwords > n) {
++		printf("adreno:  ib[end] truncated at %u\n", n);
+ 	}
+-	printf("%s\n", dwords > n ? " ..." : "");
+ }
+ 
+ /* Same, but starting at a dword offset: used for the CP's stop position. */
+@@ -1097,11 +1100,11 @@ dump_ib_window(uint64_t pa, uint32_t dwords, uint32_t at, const char *what)
+ 	if (va == 0) {
+ 		return;
+ 	}
+-	printf("adreno:  ib1 %s at %u/%u:", what, at, dwords);
++	printf("adreno:  ib1 %s at %u/%u\n", what, at, dwords);
+ 	for (uint32_t j = 0; j < n; j++) {
+-		printf(" %#x", reg_read(va, (uint32_t)(pa & 0xfffu) + (start + j) * 4u));
++		printf("adreno:  ibw[%u]=%#x\n", start + j,
++		    reg_read(va, (uint32_t)(pa & 0xfffu) + (start + j) * 4u));
+ 	}
+-	printf("\n");
+ }
+ 
+ /* An IB can contain indirect buffers; dump one level of those too. */
+@@ -1144,6 +1147,46 @@ dump_nested_ibs(uint64_t pa, uint32_t dwords)
+ 	}
+ }
+ 
++/*
++ * A word 0xffffffff at a packet boundary decodes as a type-3 packet with
++ * opcode 0xff and a 64K count.  Mesa only emits that value as padding
++ * inside a CP_LOAD_STATE4 payload, so on a boundary it is stale data in a
++ * reused buffer.  Replace it with a one-dword CP_NOP so the rest of the
++ * stream can run; log every replacement (diagnostic build).
++ */
++static uint32_t
++sanitize_ib(uint64_t pa, uint32_t dwords)
++{
++	uint32_t n = MIN(dwords, 4096u);
++	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)n * 4u);
++	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), (bytes + 0xfffu) & ~(vm_size_t)0xfffu);
++	uint32_t off = (uint32_t)(pa & 0xfffu);
++	uint32_t j = 0, fixed = 0;
++
++	if (va == 0) {
++		return 0;
++	}
++	while (j < n) {
++		uint32_t h = reg_read(va, off + j * 4u);
++
++		if ((h & 0xc0000000u) == 0) {
++			j += ((h >> 16) & 0x3fffu) + 1u;        /* type 0 */
++		} else if ((h & 0xf0000000u) == 0x40000000u) {
++			j += (h & 0x7fu) + 1u;                  /* type 4 */
++		} else if ((h & 0xf0000000u) == 0x70000000u) {
++			j += ((h & 0x3fffu) + 1u);              /* type 7 */
++		} else if (h == 0xffffffffu) {
++			reg_write(va, off + j * 4u, 0x70108000u); /* pkt7(CP_NOP, 0) */
++			printf("adreno: sanitize stray 0xffffffff at %u/%u\n", j, n);
++			fixed++;
++			j++;
++		} else {
++			j++;
++		}
++	}
++	return fixed;
++}
++
+ /* A client IB while diagnosing submission; the error is usually deep in it. */
+ static void
+ dump_ib(uint64_t pa, uint32_t dwords)
+@@ -1252,6 +1295,7 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 			printf("adreno:  ib %u pa %#llx dwords %u\n", k,
+ 				(unsigned long long)addresses[k], words[k]);
+ 			dump_ib(addresses[k], words[k]);
++			sanitize_ib(addresses[k], words[k]);
+ 		}
+ 	}
+ 
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+index 23af86f..74e5d31 100644
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -582,6 +582,14 @@ VinceGPUUserClient::sweetGemNew(uint64_t size, uint64_t *out)
+ 		base = pa[0];
+ 		flush_dcache64((addr64_t)pa[p], (unsigned)PAGE_SIZE, TRUE);
+ 	}
++	{
++		static uint32_t gem_logged;
++		if (gem_logged < 40) {
++			gem_logged++;
++			IOLog("VinceGPU: gem size %llu pa %#llx\n",
++			    (unsigned long long)size, (unsigned long long)base);
++		}
++	}
+ 	umap = memory->createMappingInTask(fTask, 0, kIOMapAnywhere);
+ 	if (umap == NULL) {
+ 		IOFreeData(pa, npages * sizeof(uint64_t));
