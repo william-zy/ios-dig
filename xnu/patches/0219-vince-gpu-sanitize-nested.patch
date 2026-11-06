@@ -1,0 +1,72 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 90609cb..56143d4 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1070,7 +1070,7 @@ vince_gpu_status(void)
+ static void
+ dump_ib_words(uint64_t pa, uint32_t dwords)
+ {
+-	uint32_t n = MIN(dwords, 512u);
++	uint32_t n = MIN(dwords, 1024u);
+ 	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)n * 4u);
+ 	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), (bytes + 0xfffu) & ~(vm_size_t)0xfffu);
+ 
+@@ -1155,7 +1155,7 @@ dump_nested_ibs(uint64_t pa, uint32_t dwords)
+  * stream can run; log every replacement (diagnostic build).
+  */
+ static uint32_t
+-sanitize_ib(uint64_t pa, uint32_t dwords)
++sanitize_ib_depth(uint64_t pa, uint32_t dwords, int depth)
+ {
+ 	uint32_t n = MIN(dwords, 4096u);
+ 	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)n * 4u);
+@@ -1177,16 +1177,48 @@ sanitize_ib(uint64_t pa, uint32_t dwords)
+ 			j += ((h & 0x3fffu) + 1u);              /* type 7 */
+ 		} else if (h == 0xffffffffu) {
+ 			reg_write(va, off + j * 4u, 0x70108000u); /* pkt7(CP_NOP, 0) */
+-			printf("adreno: sanitize stray 0xffffffff at %u/%u\n", j, n);
++			printf("adreno: sanitize stray 0xffffffff at %u/%u (depth %d)\n", j, n, depth);
+ 			fixed++;
+ 			j++;
+ 		} else {
+ 			j++;
+ 		}
+ 	}
++
++	/* The real drawing stream is often an indirect buffer chained from the
++	 * outer one; a stray word there wedges the CP just the same. */
++	if (depth < 2) {
++		for (j = 0; j + 4 <= n; j++) {
++			uint32_t h = reg_read(va, off + j * 4u);
++
++			if ((h & 0x7f000000u) == 0x70000000u &&
++			    ((h >> 16) & 0x7fu) == CP_INDIRECT_BUFFER_PFE &&
++			    (h & 0x3fffu) == 3u) {
++				uint64_t np = reg_read(va, off + (j + 1) * 4u) |
++				    ((uint64_t)reg_read(va, off + (j + 2) * 4u) << 32);
++				uint32_t nw = reg_read(va, off + (j + 3) * 4u);
++
++				if ((np >> 32) == 0 && np >= 0x40000000ull &&
++				    nw >= 4 && nw <= 65535u) {
++					printf("adreno: sanitize nested pa %#llx dwords %u\n",
++					    (unsigned long long)np, nw);
++					fixed += sanitize_ib_depth(np, nw, depth + 1);
++				}
++			}
++		}
++	}
++	if (fixed != 0) {
++		flush_dcache64((addr64_t)pa, (unsigned)(dwords * 4u), TRUE);
++	}
+ 	return fixed;
+ }
+ 
++static uint32_t
++sanitize_ib(uint64_t pa, uint32_t dwords)
++{
++	return sanitize_ib_depth(pa, dwords, 0);
++}
++
+ /* A client IB while diagnosing submission; the error is usually deep in it. */
+ static void
+ dump_ib(uint64_t pa, uint32_t dwords)
