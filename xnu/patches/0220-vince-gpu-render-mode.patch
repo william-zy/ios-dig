@@ -1,0 +1,37 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 56143d4..269fe51 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -209,6 +209,8 @@ extern void VinceGPUStart(void);
+ #define CP_WAIT_FOR_IDLE        38
+ #define CP_INDIRECT_BUFFER_PFE  63
+ #define CP_EVENT_WRITE          70
++#define CP_SET_RENDER_MODE      108
++#define CP_YIELD_ENABLE         28
+ #define CP_SET_SECURE_MODE      102
+ 
+ #define A5XX_INT_MASK           0x1190037eu     /* a5xx_gpu.c A5XX_INT_MASK */
+@@ -1271,7 +1273,7 @@ vince_gpu_parameter(uint32_t which, uint64_t *value)
+ uint32_t
+ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
+ {
+-	uint32_t needed = count * 4 + 8;
++	uint32_t needed = count * 4 + 16;
+ 	uint32_t i;
+ 
+ 	if (!gpu_ready) {
+@@ -1318,6 +1320,14 @@ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t coun
+ 	if (gpu_fence == 0) {
+ 		gpu_fence = 1;
+ 	}
++	/* Linux a5xx submits end with render-mode NULL and YIELD_ENABLE; without
++	 * it the CP keeps the render/binning state across submissions and the
++	 * next flat draw stream is parsed in the wrong mode. */
++	rb_emit(pkt7(CP_SET_RENDER_MODE, 5));
++	rb_emit(0); rb_emit(0); rb_emit(0); rb_emit(0); rb_emit(0);
++	rb_emit(pkt7(CP_YIELD_ENABLE, 1));
++	rb_emit(0x01);
++
+ 	/* freedreno fence: CP_EVENT_WRITE/CACHE_FLUSH_TS flushes the CP writes
+ 	 * and stores the fence (CP_MEM_WRITE after CP_WAIT_MEM_WRITES never
+ 	 * updated the scratch word on this GPU). */
