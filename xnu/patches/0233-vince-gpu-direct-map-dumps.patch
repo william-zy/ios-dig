@@ -1,0 +1,217 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 015fcab..bfe01d5 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -30,7 +30,6 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
+-extern void ml_io_unmap(vm_offset_t addr, vm_size_t size);
+ extern vm_offset_t kvtophys(vm_offset_t va);
+ extern uint64_t sweet_pixels_alloc(vm_size_t size);   /* SweetSurface.cpp */
+ extern unsigned long gPhysBase, gPhysSize;
+@@ -70,6 +69,43 @@
+ 		}
+ 		FlushPoC_DcacheRegion((vm_offset_t)va, (unsigned)len);
+ 		pa += len;
++	}
++}
++
++/*
++ * Diagnostic reads/writes of client buffers.  Those pages are part of the
++ * kernel's physical map, so the direct map is enough.  ml_io_map is not an
++ * option: it allocates permanent entries from an 8 MiB io_submap, and
++ * ml_io_unmap tries to delete the parent permanent entry and panics.
++ */
++static bool
++dbg_ptr(uint64_t pa, volatile uint32_t **out)
++{
++	vm_size_t len = 4;
++
++	if (pa < (uint64_t)gPhysBase ||
++	    pa - (uint64_t)gPhysBase >= (uint64_t)gPhysSize) {
++		return false;
++	}
++	*out = (volatile uint32_t *)phystokv_range(pa, &len);
++	return *out != 0 && len != 0;
++}
++
++static uint32_t
++dbg_read32(uint64_t pa)
++{
++	volatile uint32_t *p;
++
++	return dbg_ptr(pa, &p) ? *p : 0xdeadbeefu;
++}
++
++static void
++dbg_write32(uint64_t pa, uint32_t val)
++{
++	volatile uint32_t *p;
++
++	if (dbg_ptr(pa, &p)) {
++		*p = val;
+ 	}
+ }
+ 
+@@ -1199,23 +1235,14 @@
+ dump_ib_words(uint64_t pa, uint32_t dwords)
+ {
+ 	uint32_t n = MIN(dwords, 1024u);
+-	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)n * 4u);
+-	vm_size_t map_size = (bytes + 0xfffu) & ~(vm_size_t)0xfffu;
+-	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), map_size);
+-
+-	if (va == 0) {
+-		printf("adreno:  ib dump failed (pa %#llx)\n", (unsigned long long)pa);
+-		return;
+-	}
++
+ 	printf("adreno:  ib[begin] pa %#llx dwords %u\n", (unsigned long long)pa, dwords);
+ 	for (uint32_t j = 0; j < n; j++) {
+-		printf("adreno:  ib[%u]=%#x\n", j,
+-		    reg_read(va, (uint32_t)(pa & 0xfffu) + j * 4u));
++		printf("adreno:  ib[%u]=%#x\n", j, dbg_read32(pa + (uint64_t)j * 4u));
+ 	}
+ 	if (dwords > n) {
+ 		printf("adreno:  ib[end] truncated at %u\n", n);
+ 	}
+-	ml_io_unmap(va, map_size);
+ }
+ 
+ /* Same, but starting at a dword offset: used for the CP's stop position. */
+@@ -1224,19 +1251,12 @@
+ {
+ 	uint32_t start = at > 8 ? at - 8 : 0;
+ 	uint32_t n = MIN(dwords - start, 24u);
+-	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)(start + n) * 4u);
+-	vm_size_t map_size = (bytes + 0xfffu) & ~(vm_size_t)0xfffu;
+-	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), map_size);
+-
+-	if (va == 0) {
+-		return;
+-	}
++
+ 	printf("adreno:  ib1 %s at %u/%u\n", what, at, dwords);
+ 	for (uint32_t j = 0; j < n; j++) {
+ 		printf("adreno:  ibw[%u]=%#x\n", start + j,
+-		    reg_read(va, (uint32_t)(pa & 0xfffu) + (start + j) * 4u));
+-	}
+-	ml_io_unmap(va, map_size);
++		    dbg_read32(pa + ((uint64_t)start + j) * 4u));
++	}
+ }
+ 
+ /* An IB can contain indirect buffers; dump one level of those too. */
+@@ -1244,35 +1264,27 @@
+ dump_nested_ibs(uint64_t pa, uint32_t dwords)
+ {
+ 	uint32_t n = MIN(dwords, 1024u);
+-	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)n * 4u);
+-	vm_size_t map_size = (bytes + 0xfffu) & ~(vm_size_t)0xfffu;
+-	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), map_size);
+-	uint32_t off = (uint32_t)(pa & 0xfffu);
+-
+-	if (va == 0) {
+-		return;
+-	}
++
+ 	/* Check every word: a packet walk can be thrown off by the type-0
+ 	 * count encoding, and then the indirect packet is never seen. */
+ 	for (uint32_t j = 0; j + 4 <= n; j++) {
+-		uint32_t h = reg_read(va, off + j * 4u);
++		uint32_t h = dbg_read32(pa + (uint64_t)j * 4u);
+ 
+ 		if ((h & 0x7f000000u) == 0x70000000u &&
+ 		    ((h >> 16) & 0x7fu) == CP_INDIRECT_BUFFER_PFE &&
+ 		    (h & 0x3fffu) == 3u) {
+-			uint64_t np = reg_read(va, off + (j + 1) * 4u) |
+-			    ((uint64_t)reg_read(va, off + (j + 2) * 4u) << 32);
+-			uint32_t nw = reg_read(va, off + (j + 3) * 4u);
++			uint64_t np = dbg_read32(pa + ((uint64_t)j + 1u) * 4u) |
++			    ((uint64_t)dbg_read32(pa + ((uint64_t)j + 2u) * 4u) << 32);
++			uint32_t nw = dbg_read32(pa + ((uint64_t)j + 3u) * 4u);
+ 
+ 			if ((np >> 32) == 0 && np >= 0x40000000ull &&
+-			    nw >= 4 && nw <= 65535u) {
++			    nw >= 4 && nw <= 4096u) {
+ 				printf("adreno:  nested ib at %u: pa %#llx dwords %u\n",
+ 				    j, (unsigned long long)np, nw);
+ 				dump_ib_words(np, nw);
+ 			}
+ 		}
+ 	}
+-	ml_io_unmap(va, map_size);
+ }
+ 
+ /* The sanitizer's packet walk is our own guess at CP packet sizes and has
+@@ -1319,16 +1331,18 @@
+ sanitize_ib_depth(uint64_t pa, uint32_t dwords, int depth)
+ {
+ 	uint32_t n = MIN(dwords, 4096u);
+-	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)n * 4u);
+-	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), (bytes + 0xfffu) & ~(vm_size_t)0xfffu);
+-	uint32_t off = (uint32_t)(pa & 0xfffu);
+ 	uint32_t j = 0, fixed = 0;
+ 
+-	if (va == 0) {
+-		return 0;
++	/* Only buffers inside the kernel physical map can be walked. */
++	{
++		volatile uint32_t *p;
++
++		if (!dbg_ptr(pa, &p)) {
++			return 0;
++		}
+ 	}
+ 	while (j < n) {
+-		uint32_t h = reg_read(va, off + j * 4u);
++		uint32_t h = dbg_read32(pa + (uint64_t)j * 4u);
+ 
+ 		if ((h & 0xc0000000u) == 0) {
+ 			j += ((h >> 16) & 0x3fffu) + 1u;        /* type 0 */
+@@ -1337,11 +1351,11 @@
+ 		} else if ((h & 0xf0000000u) == 0x70000000u) {
+ 			j += ((h & 0x3fffu) + 1u);              /* type 7 */
+ 		} else if (h == 0xffffffffu) {
+-			reg_write(va, off + j * 4u, 0x70108000u); /* pkt7(CP_NOP, 0) */
++			dbg_write32(pa + (uint64_t)j * 4u, 0x70108000u); /* pkt7(CP_NOP, 0) */
+ 			printf("adreno: sanitize stray 0xffffffff at %u/%u (depth %d)\n", j, n, depth);
+ 			printf(" ctx:");
+ 			for (uint32_t k = (j > 4 ? j - 4 : 0); k < MIN(j + 5, n); k++) {
+-				printf(" %#x", reg_read(va, off + k * 4u));
++				printf(" %#x", dbg_read32(pa + (uint64_t)k * 4u));
+ 			}
+ 			printf("\n");
+ 			fixed++;
+@@ -1355,17 +1369,17 @@
+ 	 * outer one; a stray word there wedges the CP just the same. */
+ 	if (depth < 2) {
+ 		for (j = 0; j + 4 <= n; j++) {
+-			uint32_t h = reg_read(va, off + j * 4u);
++			uint32_t h = dbg_read32(pa + (uint64_t)j * 4u);
+ 
+ 			if ((h & 0x7f000000u) == 0x70000000u &&
+ 			    ((h >> 16) & 0x7fu) == CP_INDIRECT_BUFFER_PFE &&
+ 			    (h & 0x3fffu) == 3u) {
+-				uint64_t np = reg_read(va, off + (j + 1) * 4u) |
+-				    ((uint64_t)reg_read(va, off + (j + 2) * 4u) << 32);
+-				uint32_t nw = reg_read(va, off + (j + 3) * 4u);
++				uint64_t np = dbg_read32(pa + ((uint64_t)j + 1u) * 4u) |
++				    ((uint64_t)dbg_read32(pa + ((uint64_t)j + 2u) * 4u) << 32);
++				uint32_t nw = dbg_read32(pa + ((uint64_t)j + 3u) * 4u);
+ 
+ 				if ((np >> 32) == 0 && np >= 0x40000000ull &&
+-				    nw >= 4 && nw <= 65535u) {
++				    nw >= 4 && nw <= 4096u) {
+ 					printf("adreno: sanitize nested pa %#llx dwords %u\n",
+ 					    (unsigned long long)np, nw);
+ 					fixed += sanitize_ib_depth(np, nw, depth + 1);
+@@ -1374,7 +1388,6 @@
+ 		}
+ 	}
+ 	vince_gpu_flush(pa, (uint64_t)dwords * 4u);
+-	ml_io_unmap(va, (vm_size_t)((bytes + 0xfffu) & ~(vm_size_t)0xfffu));
+ 	return fixed;
+ }
+ 
