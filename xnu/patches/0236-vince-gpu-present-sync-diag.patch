@@ -1,0 +1,178 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 2db457a..1ca395e 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -38,7 +38,9 @@
+ void vince_adreno_init(void);
+ void vince_gpu_flush(uint64_t pa, uint64_t size);
+ void vince_gpu_surface_submitted(uint32_t id, uint32_t fence);
++uint32_t vince_gpu_surface_fence(uint32_t id);
+ bool vince_gpu_surface_wait(uint32_t id, uint32_t timeout_ms);
++bool vince_gpu_sync(uint32_t timeout_ms);
+ extern void VinceGPUStart(void);
+ 
+ /*
+@@ -1145,17 +1147,39 @@
+ 	}
+ }
+ 
++uint32_t
++vince_gpu_surface_fence(uint32_t id)
++{
++	for (uint32_t i = 0; i < SURF_FENCE_SLOTS; i++) {
++		if (surf_fence[i].id == id) {
++			return surf_fence[i].fence;
++		}
++	}
++	return 0;
++}
++
++/*
++ * There is one CP ring, so waiting for the newest fence also covers every
++ * draw that touched a surface without being listed in its submit's BOs.
++ */
++bool
++vince_gpu_sync(uint32_t timeout_ms)
++{
++	uint32_t fence = gpu_fence;
++
++	for (uint32_t waited = 0; waited < timeout_ms; waited++) {
++		if (vince_gpu_done(fence)) {
++			return true;
++		}
++		delay(1000);
++	}
++	return vince_gpu_done(fence);
++}
++
+ bool
+ vince_gpu_surface_wait(uint32_t id, uint32_t timeout_ms)
+ {
+-	uint32_t fence = 0;
+-
+-	for (uint32_t i = 0; i < SURF_FENCE_SLOTS; i++) {
+-		if (surf_fence[i].id == id) {
+-			fence = surf_fence[i].fence;
+-			break;
+-		}
+-	}
++	uint32_t fence = vince_gpu_surface_fence(id);
+ 	if (fence == 0) {
+ 		return true;
+ 	}
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+index af757ef..5285c8d 100644
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -665,6 +665,7 @@
+ 	struct gpu_buffer *b = NULL;
+ 
+ 	if (surface == NULL || surface->memory == NULL) {
++		IOLog("VinceGPU: import surface %u: no surface/memory\n", surfaceID);
+ 		OSSafeReleaseNULL(surface);
+ 		return kIOReturnNotFound;
+ 	}
+@@ -675,10 +676,13 @@
+ 	 * what lets the small text surfaces import at all. */
+ 	rounded = round_page_64(size);
+ 	if (size == 0 || rounded == 0 || rounded > GPU_BUFFER_MAX) {
++		IOLog("VinceGPU: import surface %u: bad size %llu->%llu\n", surfaceID,
++		    (unsigned long long)size, (unsigned long long)rounded);
+ 		surface->release();
+ 		return kIOReturnBadArgument;
+ 	}
+ 	if (md->prepare(kIODirectionInOut) != kIOReturnSuccess) {
++		IOLog("VinceGPU: import surface %u: prepare failed\n", surfaceID);
+ 		surface->release();
+ 		return kIOReturnVMError;
+ 	}
+@@ -694,6 +698,9 @@
+ 		pa[p] = md->getPhysicalSegment((IOByteCount)p * PAGE_SIZE, &segment, kIOMemoryMapperNone);
+ 		if (pa[p] == 0 || (pa[p] & PAGE_MASK) != 0 || segment < PAGE_SIZE ||
+ 		    (p != 0 && pa[p] != base + (uint64_t)p * PAGE_SIZE)) {
++			IOLog("VinceGPU: import surface %u: page %u/%u pa %#llx seg %llu base %#llx\n",
++			    surfaceID, p, npages, (unsigned long long)pa[p],
++			    (unsigned long long)segment, (unsigned long long)base);
+ 			IOFreeData(pa, npages * sizeof(uint64_t));
+ 			md->complete();
+ 			surface->release();
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index be45c21..b34195d 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -38,7 +38,9 @@
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ #if defined(ARM64_BOARD_CONFIG_VINCE)
++extern "C" uint32_t vince_gpu_surface_fence(uint32_t id);
+ extern "C" bool vince_gpu_surface_wait(uint32_t id, uint32_t timeout_ms);
++extern "C" bool vince_gpu_sync(uint32_t timeout_ms);
+ #endif
+ 
+ #if defined(SWEET) || defined(ARM64_BOARD_CONFIG_VINCE)
+@@ -482,6 +484,11 @@
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+ 
++#if defined(ARM64_BOARD_CONFIG_VINCE)
++	/* One ring: finishing the newest submit means every draw that could
++	 * still be writing any layer is done. */
++	vince_gpu_sync(30);
++#endif
+ 
+ 	if (!fConsolePaused) {
+ 		int quiet = 0;
+@@ -507,7 +514,17 @@
+ #if defined(ARM64_BOARD_CONFIG_VINCE)
+ 		/* A swap does not mean the GPU finished: Mesa queues the draw and
+ 		 * returns.  Copying early shows the cleared rows as black bands. */
+-		vince_gpu_surface_wait(id, 30);
++		{
++			static uint32_t present_logs;
++			uint32_t sf = vince_gpu_surface_fence(id);
++			bool ok = vince_gpu_surface_wait(id, 30);
++
++			if (present_logs < 32) {
++				present_logs++;
++				IOLog("SWEET FB: present surf %u fence %u wait %s\n",
++				    id, sf, ok ? "ok" : "TIMEOUT");
++			}
++		}
+ #endif
+ 		SweetSurface *s = sweet_surface_copy(id);
+ 		if (sweet_fb_swaps_logged < 16) {
+@@ -600,9 +617,11 @@
+ 		flushPanel();
+ 		if (fPanel != 0 && sweet_fb_pixel_logs < 16) {
+ 			uint32_t pz = 0, ps = 0, dpz = 0, dps = 0, first = 0;
++			uint32_t sb[8] = { 0 }, pb[8] = { 0 };
+ 
+ 			sweet_fb_pixel_logs++;
+ 			for (uint32_t yy = 0; yy < fHeight; yy += 32) {
++				uint32_t band = yy * 8u / fHeight;
+ 				const uint32_t *row = (const uint32_t *)(fPixels +
+ 				    (uint64_t)yy * fRowBytes);
+ 				volatile const uint8_t *prow = (volatile const uint8_t *)(fPanel +
+@@ -618,17 +637,22 @@
+ 					dps++;
+ 					if ((v & 0xffffffu) != 0) {
+ 						pz++;
++						sb[band]++;
+ 						if (first == 0) {
+ 							first = v;
+ 						}
+ 					}
+ 					if (p != 0) {
+ 						dpz++;
++						pb[band]++;
+ 					}
+ 				}
+ 			}
+ 			IOLog("SWEET FB: frame shadow %u/%u panel %u/%u nonzero first %08x\n",
+ 			    pz, ps, dpz, dps, first);
++			IOLog("SWEET FB: bands shadow %u %u %u %u %u %u %u %u panel %u %u %u %u %u %u %u %u\n",
++			    sb[0], sb[1], sb[2], sb[3], sb[4], sb[5], sb[6], sb[7],
++			    pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6], pb[7]);
+ 		}
+ 	}
+ #endif
