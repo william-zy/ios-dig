@@ -1,0 +1,160 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index bfe01d5..2db457a 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -37,6 +37,8 @@
+ extern void FlushPoC_DcacheRegion(vm_offset_t va, unsigned length);
+ void vince_adreno_init(void);
+ void vince_gpu_flush(uint64_t pa, uint64_t size);
++void vince_gpu_surface_submitted(uint32_t id, uint32_t fence);
++bool vince_gpu_surface_wait(uint32_t id, uint32_t timeout_ms);
+ extern void VinceGPUStart(void);
+ 
+ /*
+@@ -1106,6 +1108,66 @@
+ 	return (int32_t)(cur - fence) >= 0;
+ }
+ 
++/*
++ * Latest fence that used each imported IOSurface.  A swap record names the
++ * surface, but Mesa has only queued the draw commands; present must wait
++ * for them or the panel shows the cleared rows as black bands mid-scroll.
++ */
++#define SURF_FENCE_SLOTS 64
++static struct {
++	uint32_t id;
++	uint32_t fence;
++} surf_fence[SURF_FENCE_SLOTS];
++static uint32_t surf_fence_next;
++
++void
++vince_gpu_surface_submitted(uint32_t id, uint32_t fence)
++{
++	uint32_t slot = SURF_FENCE_SLOTS;
++
++	if (id == 0 || fence == 0) {
++		return;
++	}
++	for (uint32_t i = 0; i < SURF_FENCE_SLOTS; i++) {
++		if (surf_fence[i].id == id) {
++			slot = i;
++			break;
++		}
++	}
++	if (slot == SURF_FENCE_SLOTS) {
++		slot = surf_fence_next;
++		surf_fence_next = (surf_fence_next + 1) % SURF_FENCE_SLOTS;
++		surf_fence[slot].id = id;
++		surf_fence[slot].fence = 0;
++	}
++	if ((int32_t)(fence - surf_fence[slot].fence) > 0) {
++		surf_fence[slot].fence = fence;
++	}
++}
++
++bool
++vince_gpu_surface_wait(uint32_t id, uint32_t timeout_ms)
++{
++	uint32_t fence = 0;
++
++	for (uint32_t i = 0; i < SURF_FENCE_SLOTS; i++) {
++		if (surf_fence[i].id == id) {
++			fence = surf_fence[i].fence;
++			break;
++		}
++	}
++	if (fence == 0) {
++		return true;
++	}
++	for (uint32_t waited = 0; waited < timeout_ms; waited++) {
++		if (vince_gpu_done(fence)) {
++			return true;
++		}
++		delay(1000);
++	}
++	return vince_gpu_done(fence);
++}
++
+ static void dump_ib_window(uint64_t pa, uint32_t dwords, uint32_t at, const char *what);
+ 
+ /* The CP queue debug ports are indexed: writing ADDR selects the entry and
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+index 65f9962..af757ef 100644
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -28,6 +28,7 @@
+ uint32_t vince_gpu_last(void);
+ void vince_gpu_status(void);
+ void vince_gpu_flush(uint64_t pa, uint64_t size);
++void vince_gpu_surface_submitted(uint32_t id, uint32_t fence);
+ void VinceGPUStart(void);
+ void VinceGPUStop(void);
+ void flush_dcache64(addr64_t addr, unsigned count, int phys);
+@@ -143,6 +144,7 @@
+ 	uint32_t lastFence;
+ 	bool used;
+ 	SweetSurface *surface;          /* kSweetGemImport */
++	uint32_t surfaceID;             /* kSweetGemImport: presented by SweetFramebuffer */
+ 	uint64_t poolPa;                /* kSweetGemNew: range from the boot pool */
+ };
+ 
+@@ -489,6 +491,15 @@
+ 	}
+ 
+ 	request->fence = vince_gpu_submit(addresses, words, count);
++	if (request->fence != 0) {
++		for (uint32_t i = 0; i < request->nr_bos; i++) {
++			struct gpu_buffer *b = buffer(bos[i].handle);
++
++			if (b != NULL && b->surfaceID != 0) {
++				vince_gpu_surface_submitted(b->surfaceID, request->fence);
++			}
++		}
++	}
+ 	IOLockUnlock(gGPULock);
+ 
+ 	if (request->fence == 0) {
+@@ -705,6 +716,7 @@
+ 		bzero(b, sizeof(*b));
+ 		b->memory = md;
+ 		b->surface = surface;
++		b->surfaceID = surfaceID;
+ 		b->address = base;
+ 		b->size = rounded;
+ 		b->pa = pa;
+@@ -840,6 +852,9 @@
+ 	for (uint32_t i = 0; i < nr_bos; i++) {
+ 		listed[i]->lastFence = seq;
+ 		listed[i]->used = true;
++		if (listed[i]->surfaceID != 0) {
++			vince_gpu_surface_submitted(listed[i]->surfaceID, seq);
++		}
+ 	}
+ 	*sequence = seq;
+ 
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 6a43afa..be45c21 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -37,6 +37,9 @@
+ #include "SweetSurface.h"
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
++#if defined(ARM64_BOARD_CONFIG_VINCE)
++extern "C" bool vince_gpu_surface_wait(uint32_t id, uint32_t timeout_ms);
++#endif
+ 
+ #if defined(SWEET) || defined(ARM64_BOARD_CONFIG_VINCE)
+ #include <IOKit/IOService.h>
+@@ -501,6 +504,11 @@
+ 		if (!(mask & (1u << layer)) || id == 0) {
+ 			continue;
+ 		}
++#if defined(ARM64_BOARD_CONFIG_VINCE)
++		/* A swap does not mean the GPU finished: Mesa queues the draw and
++		 * returns.  Copying early shows the cleared rows as black bands. */
++		vince_gpu_surface_wait(id, 30);
++#endif
+ 		SweetSurface *s = sweet_surface_copy(id);
+ 		if (sweet_fb_swaps_logged < 16) {
+ 			sweet_fb_swaps_logged++;
