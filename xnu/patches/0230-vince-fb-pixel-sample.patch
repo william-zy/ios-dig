@@ -1,0 +1,80 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 4f69c61..6a43afa 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -453,6 +453,7 @@
+ static uint32_t sweet_fb_swaps_logged;
+ static bool sweet_fb_swepend_logged;
+ static uint64_t sweet_fb_swap_count;
++static uint32_t sweet_fb_pixel_logs;
+ 
+ /* Copy each enabled layer's surface into the panel memory (no scaling). */
+ /*
+@@ -556,6 +557,28 @@
+ 			src = 0;
+ 		}
+ 		if (src != 0 && bpe == 4) {
++			/* Is the composited surface actually lit?  A black panel with a
++			 * black surface is a renderer problem, not a panel problem. */
++			if (sweet_fb_pixel_logs < 16) {
++				uint32_t nz = 0, ns = 0, first = 0;
++
++				for (int32_t yy = 0; yy < h; yy += 16) {
++					for (int32_t xx = 0; xx < w; xx += 16) {
++						uint32_t v = *(volatile uint32_t *)(src + s->offset +
++						    (uint64_t)(sy + yy) * s->bytesPerRow +
++						    (uint64_t)(sx + xx) * 4);
++						ns++;
++						if ((v & 0xffffffu) != 0) {
++							nz++;
++							if (first == 0) {
++								first = v;
++							}
++						}
++					}
++				}
++				IOLog("SWEET FB: layer %u surface %u sample %u/%u nonzero first %08x\n",
++				    layer, id, nz, ns, first);
++			}
+ 			for (int32_t y = 0; y < h; y++) {
+ 				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+@@ -567,6 +590,38 @@
+ #if defined(ARM64_BOARD_CONFIG_VINCE)
+ 	if (fPanelBpp == 3) {
+ 		flushPanel();
++		if (fPanel != 0 && sweet_fb_pixel_logs < 16) {
++			uint32_t pz = 0, ps = 0, dpz = 0, dps = 0, first = 0;
++
++			sweet_fb_pixel_logs++;
++			for (uint32_t yy = 0; yy < fHeight; yy += 32) {
++				const uint32_t *row = (const uint32_t *)(fPixels +
++				    (uint64_t)yy * fRowBytes);
++				volatile const uint8_t *prow = (volatile const uint8_t *)(fPanel +
++				    (uint64_t)yy * fPanelRowBytes);
++
++				for (uint32_t xx = 0; xx < fWidth; xx += 32) {
++					uint32_t v = row[xx];
++					uint32_t p = (uint32_t)prow[xx * 3] |
++					    ((uint32_t)prow[xx * 3 + 1] << 8) |
++					    ((uint32_t)prow[xx * 3 + 2] << 16);
++
++					ps++;
++					dps++;
++					if ((v & 0xffffffu) != 0) {
++						pz++;
++						if (first == 0) {
++							first = v;
++						}
++					}
++					if (p != 0) {
++						dpz++;
++					}
++				}
++			}
++			IOLog("SWEET FB: frame shadow %u/%u panel %u/%u nonzero first %08x\n",
++			    pz, ps, dpz, dps, first);
++		}
+ 	}
+ #endif
+ }
