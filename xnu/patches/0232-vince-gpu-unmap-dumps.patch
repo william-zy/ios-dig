@@ -1,0 +1,121 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index e360d8a..015fcab 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -30,6 +30,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
++extern void ml_io_unmap(vm_offset_t addr, vm_size_t size);
+ extern vm_offset_t kvtophys(vm_offset_t va);
+ extern uint64_t sweet_pixels_alloc(vm_size_t size);   /* SweetSurface.cpp */
+ extern unsigned long gPhysBase, gPhysSize;
+@@ -1120,6 +1121,8 @@
+ vince_gpu_status(void)
+ {
+ 	static uint32_t status_calls;
++	static uint32_t status_prints;
++	static uint32_t queue_dumps;
+ 	uint32_t stat = gr(A5_RBBM_INT_0_STATUS);
+ 	uint32_t cpint = gr(A5_CP_INTERRUPT_STATUS);
+ 	uint32_t opcode = 0;
+@@ -1166,21 +1169,25 @@
+ 			}
+ 			printf("\n");
+ 		}
+-		if (cpint & 0x1u) {
++		if ((cpint & 0x1u) && queue_dumps < 4) {
++			queue_dumps++;
+ 			dump_cp_queues();
+ 		}
+-		for (uint32_t h = 0; h < IB_HISTORY; h++) {
+-			for (uint32_t i = 0; i < ib_history[h].count; i++) {
+-				if (ib_history[h].pa[i] != ib1 ||
+-				    bufsz > ib_history[h].words[i]) {
+-					continue;
++		if (status_prints < 24) {
++			status_prints++;
++			for (uint32_t h = 0; h < IB_HISTORY; h++) {
++				for (uint32_t i = 0; i < ib_history[h].count; i++) {
++					if (ib_history[h].pa[i] != ib1 ||
++					    bufsz > ib_history[h].words[i]) {
++						continue;
++					}
++					printf("adreno: history fence %u ib %u\n",
++					    ib_history[h].fence, i);
++					dump_ib_window(ib1, ib_history[h].words[i],
++					    ib_history[h].words[i] - bufsz, "if-bufsz-is-left");
++					dump_ib_window(ib1, ib_history[h].words[i], bufsz,
++					    "if-bufsz-is-fetched");
+ 				}
+-				printf("adreno: history fence %u ib %u\n",
+-				    ib_history[h].fence, i);
+-				dump_ib_window(ib1, ib_history[h].words[i],
+-				    ib_history[h].words[i] - bufsz, "if-bufsz-is-left");
+-				dump_ib_window(ib1, ib_history[h].words[i], bufsz,
+-				    "if-bufsz-is-fetched");
+ 			}
+ 		}
+ 	}
+@@ -1193,7 +1200,8 @@
+ {
+ 	uint32_t n = MIN(dwords, 1024u);
+ 	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)n * 4u);
+-	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), (bytes + 0xfffu) & ~(vm_size_t)0xfffu);
++	vm_size_t map_size = (bytes + 0xfffu) & ~(vm_size_t)0xfffu;
++	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), map_size);
+ 
+ 	if (va == 0) {
+ 		printf("adreno:  ib dump failed (pa %#llx)\n", (unsigned long long)pa);
+@@ -1207,6 +1215,7 @@
+ 	if (dwords > n) {
+ 		printf("adreno:  ib[end] truncated at %u\n", n);
+ 	}
++	ml_io_unmap(va, map_size);
+ }
+ 
+ /* Same, but starting at a dword offset: used for the CP's stop position. */
+@@ -1216,7 +1225,8 @@
+ 	uint32_t start = at > 8 ? at - 8 : 0;
+ 	uint32_t n = MIN(dwords - start, 24u);
+ 	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)(start + n) * 4u);
+-	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), (bytes + 0xfffu) & ~(vm_size_t)0xfffu);
++	vm_size_t map_size = (bytes + 0xfffu) & ~(vm_size_t)0xfffu;
++	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), map_size);
+ 
+ 	if (va == 0) {
+ 		return;
+@@ -1226,6 +1236,7 @@
+ 		printf("adreno:  ibw[%u]=%#x\n", start + j,
+ 		    reg_read(va, (uint32_t)(pa & 0xfffu) + (start + j) * 4u));
+ 	}
++	ml_io_unmap(va, map_size);
+ }
+ 
+ /* An IB can contain indirect buffers; dump one level of those too. */
+@@ -1234,7 +1245,8 @@
+ {
+ 	uint32_t n = MIN(dwords, 1024u);
+ 	vm_size_t bytes = (vm_size_t)((pa & 0xfffu) + (uint64_t)n * 4u);
+-	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), (bytes + 0xfffu) & ~(vm_size_t)0xfffu);
++	vm_size_t map_size = (bytes + 0xfffu) & ~(vm_size_t)0xfffu;
++	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), map_size);
+ 	uint32_t off = (uint32_t)(pa & 0xfffu);
+ 
+ 	if (va == 0) {
+@@ -1260,6 +1272,7 @@
+ 			}
+ 		}
+ 	}
++	ml_io_unmap(va, map_size);
+ }
+ 
+ /* The sanitizer's packet walk is our own guess at CP packet sizes and has
+@@ -1361,6 +1374,7 @@
+ 		}
+ 	}
+ 	vince_gpu_flush(pa, (uint64_t)dwords * 4u);
++	ml_io_unmap(va, (vm_size_t)((bytes + 0xfffu) & ~(vm_size_t)0xfffu));
+ 	return fixed;
+ }
+ 
