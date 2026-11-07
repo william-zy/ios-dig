@@ -1,0 +1,88 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index 8c8ed7e..d2362d6 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -1159,6 +1159,39 @@
+ 	}
+ }
+ 
++/* The sanitizer's packet walk is our own guess at CP packet sizes and has
++ * replaced real load-state payload words (0xffffffff) that the CP accepts, so
++ * keep it off unless a boot-arg explicitly asks for it. */
++static int
++sanitize_enabled(void)
++{
++	static int enabled = -1;
++
++	if (enabled < 0) {
++		enabled = 0;
++		PE_parse_boot_argn("sweetsanitize", &enabled, sizeof(enabled));
++		printf("adreno: IB sanitize %s by boot-arg\n",
++		    enabled ? "enabled" : "disabled");
++	}
++	return enabled;
++}
++
++/* Setting render mode 1 before the IBs made the CP fail earlier than the 0225
++ * sequence did, so keep that packet opt-in as well. */
++static int
++render_mode1_enabled(void)
++{
++	static int enabled = -1;
++
++	if (enabled < 0) {
++		enabled = 0;
++		PE_parse_boot_argn("sweetmode1", &enabled, sizeof(enabled));
++		printf("adreno: leading render mode 1 %s by boot-arg\n",
++		    enabled ? "enabled" : "disabled");
++	}
++	return enabled;
++}
++
+ /*
+  * A word 0xffffffff at a packet boundary decodes as a type-3 packet with
+  * opcode 0xff and a 64K count.  Mesa only emits that value as padding
+@@ -1407,7 +1440,8 @@
+ uint32_t
+ vince_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
+ {
+-	uint32_t needed = count * 4 + 22;
++	bool want_mode1 = render_mode1_enabled();
++	uint32_t needed = count * 4 + 16 + (want_mode1 ? 6u : 0u);
+ 	uint64_t copy_pa[IB_TRACK];
+ 	uint32_t shadow_slot = 0;
+ 	bool use_copy = false;
+@@ -1439,19 +1473,25 @@
+ 	}
+ 
+ 	/* Every submit, not just the first three: the stray word can appear at
+-	 * any frame, and a single one wedges the CP for the rest of the boot. */
+-	for (i = 0; i < count; i++) {
+-		if (sanitize_ib(addresses[i], words[i]) != 0) {
+-			flush_dcache64((addr64_t)addresses[i], (unsigned)(words[i] * 4u), TRUE);
++	 * any frame, and a single one wedges the CP for the rest of the boot.
++	 * Off by default; see sanitize_enabled(). */
++	if (sanitize_enabled()) {
++		for (i = 0; i < count; i++) {
++			if (sanitize_ib(addresses[i], words[i]) != 0) {
++				flush_dcache64((addr64_t)addresses[i],
++				    (unsigned)(words[i] * 4u), TRUE);
++			}
+ 		}
+ 	}
+ 
+ 	use_copy = shadow_prepare(addresses, words, count, copy_pa, &shadow_slot);
+ 
+-	/* Mesa's wrapper IBs start in render mode 1; a flat draw/state IB has no
+-	 * such packet, so set it here for the whole submission. */
+-	rb_emit(pkt7(CP_SET_RENDER_MODE, 5));
+-	rb_emit(1); rb_emit(0); rb_emit(0); rb_emit(0); rb_emit(0);
++	if (want_mode1) {
++		/* Mesa's wrapper IBs start in render mode 1; a flat draw/state
++		 * IB has no such packet, so set it here for the submission. */
++		rb_emit(pkt7(CP_SET_RENDER_MODE, 5));
++		rb_emit(1); rb_emit(0); rb_emit(0); rb_emit(0); rb_emit(0);
++	}
+ 
+ 	for (i = 0; i < count; i++) {
+ 		uint64_t addr = use_copy ? copy_pa[i] : addresses[i];
