@@ -1,0 +1,148 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index d2362d6..f5a90b8 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -156,6 +156,10 @@
+ #define A5_CP_RB_WPTR                   0x0807
+ #define A5_CP_ROQ_THRESHOLDS_1          0x081f
+ #define A5_CP_ROQ_THRESHOLDS_2          0x0820
++#define A5_CP_ROQ_DBG_ADDR              0x0821
++#define A5_CP_ROQ_DBG_DATA              0x0822
++#define A5_CP_MEQ_DBG_ADDR              0x0823
++#define A5_CP_MEQ_DBG_DATA              0x0824
+ #define A5_CP_MEQ_THRESHOLDS            0x0825
+ #define A5_CP_MERCIU_SIZE               0x0826
+ #define A5_CP_PFP_ME_CNTL               0x0832
+@@ -664,11 +668,18 @@
+ static vm_offset_t gmem_va = 0;
+ static uint32_t rb_wptr = 0;
+ 
+-/* IBs of the most recent submit, for the IB1_BUFSZ window in a timeout. */
++/* IBs of recent submits, for the IB1_BUFSZ window in a timeout. */
+ #define IB_TRACK 8
+-static uint64_t ib_track_pa[IB_TRACK];
+-static uint32_t ib_track_words[IB_TRACK];
+-static uint32_t ib_track_count;
++#define IB_HISTORY 4
++/* Recent submissions: the client submits more work before it waits, so the
++ * last submit is not necessarily the one the CP is stopped in. */
++static struct {
++	uint32_t fence;
++	uint32_t count;
++	uint64_t pa[IB_TRACK];
++	uint32_t words[IB_TRACK];
++} ib_history[IB_HISTORY];
++static uint32_t ib_history_next;
+ 
+ static inline void
+ gw(uint32_t reg, uint32_t val)
+@@ -1023,6 +1034,51 @@
+ 
+ static void dump_ib_window(uint64_t pa, uint32_t dwords, uint32_t at, const char *what);
+ 
++/* The CP queue debug ports are indexed: writing ADDR selects the entry and
++ * the first DATA read still returns the previously selected one. */
++static uint32_t
++cp_queue_read(uint32_t addr_reg, uint32_t data_reg, uint32_t index)
++{
++	gw(addr_reg, index);
++	(void)gr(data_reg);
++	return gr(data_reg);
++}
++
++/*
++ * On a CP opcode error the offending packet has already left the ring and the
++ * IB cursor (IB1_BUFSZ) can only bound where it happened.  The ROQ holds the
++ * packets the PFP decoded, so dump it verbatim.
++ */
++static void
++dump_cp_queues(void)
++{
++	printf("adreno: ROQ thr=%#x/%#x MEQ thr=%#x\n",
++	    gr(A5_CP_ROQ_THRESHOLDS_1), gr(A5_CP_ROQ_THRESHOLDS_2),
++	    gr(A5_CP_MEQ_THRESHOLDS));
++	printf("adreno: ROQ:");
++	for (uint32_t i = 0; i < 256; i++) {
++		printf(" %#x",
++		    cp_queue_read(A5_CP_ROQ_DBG_ADDR, A5_CP_ROQ_DBG_DATA, i));
++		if ((i & 15u) == 15u) {
++			printf("\n");
++			if (i != 255) {
++				printf("adreno: ROQ+%u:", i + 1);
++			}
++		}
++	}
++	printf("adreno: MEQ:");
++	for (uint32_t i = 0; i < 32; i++) {
++		printf(" %#x",
++		    cp_queue_read(A5_CP_MEQ_DBG_ADDR, A5_CP_MEQ_DBG_DATA, i));
++		if ((i & 15u) == 15u) {
++			printf("\n");
++			if (i != 31) {
++				printf("adreno: MEQ+%u:", i + 1);
++			}
++		}
++	}
++}
++
+ void
+ vince_gpu_status(void)
+ {
+@@ -1073,11 +1129,21 @@
+ 			}
+ 			printf("\n");
+ 		}
+-		for (uint32_t i = 0; i < ib_track_count; i++) {
+-			if (ib_track_pa[i] == ib1 && bufsz <= ib_track_words[i]) {
+-				dump_ib_window(ib1, ib_track_words[i],
+-				    ib_track_words[i] - bufsz, "if-bufsz-is-left");
+-				dump_ib_window(ib1, ib_track_words[i], bufsz, "if-bufsz-is-fetched");
++		if (cpint & 0x1u) {
++			dump_cp_queues();
++		}
++		for (uint32_t h = 0; h < IB_HISTORY; h++) {
++			for (uint32_t i = 0; i < ib_history[h].count; i++) {
++				if (ib_history[h].pa[i] != ib1 ||
++				    bufsz > ib_history[h].words[i]) {
++					continue;
++				}
++				printf("adreno: history fence %u ib %u\n",
++				    ib_history[h].fence, i);
++				dump_ib_window(ib1, ib_history[h].words[i],
++				    ib_history[h].words[i] - bufsz, "if-bufsz-is-left");
++				dump_ib_window(ib1, ib_history[h].words[i], bufsz,
++				    "if-bufsz-is-fetched");
+ 			}
+ 		}
+ 	}
+@@ -1466,12 +1532,6 @@
+ 
+ 	static int submits_logged;
+ 
+-	ib_track_count = MIN(count, (uint32_t)IB_TRACK);
+-	for (i = 0; i < ib_track_count; i++) {
+-		ib_track_pa[i] = addresses[i];
+-		ib_track_words[i] = words[i];
+-	}
+-
+ 	/* Every submit, not just the first three: the stray word can appear at
+ 	 * any frame, and a single one wedges the CP for the rest of the boot.
+ 	 * Off by default; see sanitize_enabled(). */
+@@ -1546,6 +1606,17 @@
+ 
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	gw(A5_CP_RB_WPTR, rb_wptr);
++	{
++		uint32_t h = ib_history_next;
++
++		ib_history_next = (ib_history_next + 1) % IB_HISTORY;
++		ib_history[h].fence = gpu_fence;
++		ib_history[h].count = MIN(count, (uint32_t)IB_TRACK);
++		for (i = 0; i < ib_history[h].count; i++) {
++			ib_history[h].pa[i] = addresses[i];
++			ib_history[h].words[i] = words[i];
++		}
++	}
+ 	if (use_copy) {
+ 		gpu_shadow_fence[shadow_slot] = gpu_fence;
+ 	}
