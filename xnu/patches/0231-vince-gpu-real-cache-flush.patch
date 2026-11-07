@@ -1,0 +1,107 @@
+diff --git a/bsd/dev/vince_adreno.c b/bsd/dev/vince_adreno.c
+index f5a90b8..e360d8a 100644
+--- a/bsd/dev/vince_adreno.c
++++ b/bsd/dev/vince_adreno.c
+@@ -32,8 +32,45 @@
+ extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
+ extern vm_offset_t kvtophys(vm_offset_t va);
+ extern uint64_t sweet_pixels_alloc(vm_size_t size);   /* SweetSurface.cpp */
++extern unsigned long gPhysBase, gPhysSize;
++extern uint64_t phystokv_range(uint64_t pa, vm_size_t *max_len);
++extern void FlushPoC_DcacheRegion(vm_offset_t va, unsigned length);
+ void vince_adreno_init(void);
++void vince_gpu_flush(uint64_t pa, uint64_t size);
+ extern void VinceGPUStart(void);
++
++/*
++ * CPU and GPU do not snoop each other: the client BOs are mapped cacheable,
++ * the SMMU stays in bypass, and VINCE.h's __ARM_COHERENT_IO__ compiles
++ * flush_dcache64() down to a bare DSB (Apple's fabric snoops; Adreno does
++ * not).  Walk the kernel's physical map and do the real maintenance, then
++ * invalidate so the next CPU read comes from DRAM as well.
++ */
++void
++vince_gpu_flush(uint64_t pa, uint64_t size)
++{
++	uint64_t end;
++
++	if (size == 0) {
++		return;
++	}
++	pa &= ~0xfffull;
++	end = (pa + size + 0xfffull) & ~0xfffull;
++	if (pa < (uint64_t)gPhysBase ||
++	    end > (uint64_t)gPhysBase + (uint64_t)gPhysSize) {
++		return;
++	}
++	while (pa < end) {
++		vm_size_t len = (vm_size_t)MIN((uint64_t)PAGE_SIZE, end - pa);
++		uint64_t va = phystokv_range(pa, &len);
++
++		if (va == 0 || len == 0) {
++			break;
++		}
++		FlushPoC_DcacheRegion((vm_offset_t)va, (unsigned)len);
++		pa += len;
++	}
++}
+ 
+ /* ---- Register Bases ---- */
+ #define GCC_BASE_PA             0x01800000u
+@@ -1323,7 +1360,7 @@
+ 			}
+ 		}
+ 	}
+-	flush_dcache64((addr64_t)pa, (unsigned)(dwords * 4u), TRUE);
++	vince_gpu_flush(pa, (uint64_t)dwords * 4u);
+ 	return fixed;
+ }
+ 
+@@ -1497,7 +1534,7 @@
+ 		}
+ 		copy_pa[i] = npa;
+ 	}
+-	flush_dcache64((addr64_t)slot_pa, GPU_SHADOW_SLOT, TRUE);
++	vince_gpu_flush(slot_pa, GPU_SHADOW_SLOT);
+ 	gpu_shadow_next = (slot + 1) % GPU_SHADOW_SLOTS;
+ 	*out_slot = slot;
+ 	return true;
+@@ -1538,8 +1575,7 @@
+ 	if (sanitize_enabled()) {
+ 		for (i = 0; i < count; i++) {
+ 			if (sanitize_ib(addresses[i], words[i]) != 0) {
+-				flush_dcache64((addr64_t)addresses[i],
+-				    (unsigned)(words[i] * 4u), TRUE);
++				vince_gpu_flush(addresses[i], (uint64_t)words[i] * 4u);
+ 			}
+ 		}
+ 	}
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+index 74e5d31..b9c6f5d 100644
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -27,6 +27,7 @@
+ bool vince_gpu_done(uint32_t fence);
+ uint32_t vince_gpu_last(void);
+ void vince_gpu_status(void);
++void vince_gpu_flush(uint64_t pa, uint64_t size);
+ void VinceGPUStart(void);
+ void VinceGPUStop(void);
+ void flush_dcache64(addr64_t addr, unsigned count, int phys);
+@@ -339,12 +340,13 @@
+ 	return offset <= b->size && bytes <= b->size - offset;
+ }
+ 
+-/* CPU writes to these pages must reach memory before the GPU reads them. */
++/* CPU writes to these pages must reach memory before the GPU reads them
++ * (and, after a fence, the CPU must not keep stale lines from the GPU). */
+ void
+ VinceGPUUserClient::flushBuffer(const struct gpu_buffer *b)
+ {
+-	for (uint32_t p = 0; b->pa != NULL && p < b->npages; p++) {
+-		flush_dcache64((addr64_t)b->pa[p], (unsigned)PAGE_SIZE, TRUE);
++	if (b->memory != NULL) {
++		vince_gpu_flush(b->address, b->size);
+ 	}
+ }
+ 
