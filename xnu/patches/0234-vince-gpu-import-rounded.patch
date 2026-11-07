@@ -1,0 +1,60 @@
+diff --git a/iokit/Kernel/arm/VinceGPU.cpp b/iokit/Kernel/arm/VinceGPU.cpp
+index b9c6f5d..65f9962 100644
+--- a/iokit/Kernel/arm/VinceGPU.cpp
++++ b/iokit/Kernel/arm/VinceGPU.cpp
+@@ -649,7 +649,7 @@
+ {
+ 	SweetSurface *surface = sweet_surface_copy(surfaceID);
+ 	IOMemoryDescriptor *md;
+-	uint64_t size, base = 0, *pa;
++	uint64_t size, rounded, base = 0, *pa;
+ 	uint32_t npages, slot = GPU_BUFFERS;
+ 	struct gpu_buffer *b = NULL;
+ 
+@@ -659,7 +659,11 @@
+ 	}
+ 	md = surface->memory;
+ 	size = md->getLength();
+-	if (size == 0 || (size & PAGE_MASK) != 0 || size > GPU_BUFFER_MAX) {
++	/* IOSurface lengths are byte-exact (a 256x61 A8 glyph plane is 15613
++	 * bytes), but the descriptor covers whole pages.  Rounding up here is
++	 * what lets the small text surfaces import at all. */
++	rounded = round_page_64(size);
++	if (size == 0 || rounded == 0 || rounded > GPU_BUFFER_MAX) {
+ 		surface->release();
+ 		return kIOReturnBadArgument;
+ 	}
+@@ -667,7 +671,7 @@
+ 		surface->release();
+ 		return kIOReturnVMError;
+ 	}
+-	npages = (uint32_t)(size / PAGE_SIZE);
++	npages = (uint32_t)(rounded / PAGE_SIZE);
+ 	pa = (uint64_t *)IOMallocData(npages * sizeof(uint64_t));
+ 	if (pa == NULL) {
+ 		md->complete();
+@@ -702,7 +706,7 @@
+ 		b->memory = md;
+ 		b->surface = surface;
+ 		b->address = base;
+-		b->size = size;
++		b->size = rounded;
+ 		b->pa = pa;
+ 		b->npages = npages;
+ 	}
+@@ -713,11 +717,12 @@
+ 		surface->release();
+ 		return kIOReturnNoResources;
+ 	}
+-	IOLog("VinceGPU: import surface %u size %llu at %#llx as bo %u\n", surfaceID,
+-	    (unsigned long long)size, (unsigned long long)base, slot + 1);
++	IOLog("VinceGPU: import surface %u size %llu (%llu) at %#llx as bo %u\n", surfaceID,
++	    (unsigned long long)size, (unsigned long long)rounded,
++	    (unsigned long long)base, slot + 1);
+ 	out[0] = slot + 1;
+ 	out[1] = base;
+-	out[2] = size;
++	out[2] = rounded;
+ 	return kIOReturnSuccess;
+ }
+ 
