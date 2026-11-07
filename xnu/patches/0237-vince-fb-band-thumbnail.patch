@@ -1,0 +1,75 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index b34195d..4b6d662 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -615,13 +615,14 @@
+ #if defined(ARM64_BOARD_CONFIG_VINCE)
+ 	if (fPanelBpp == 3) {
+ 		flushPanel();
+-		if (fPanel != 0 && sweet_fb_pixel_logs < 16) {
++		if (fPanel != 0) {
+ 			uint32_t pz = 0, ps = 0, dpz = 0, dps = 0, first = 0;
+-			uint32_t sb[8] = { 0 }, pb[8] = { 0 };
++			uint32_t sb[16] = { 0 }, pb[16] = { 0 };
++			bool suspect = false;
+ 
+ 			sweet_fb_pixel_logs++;
+-			for (uint32_t yy = 0; yy < fHeight; yy += 32) {
+-				uint32_t band = yy * 8u / fHeight;
++			for (uint32_t yy = 0; yy < fHeight; yy += 16) {
++				uint32_t band = yy * 16u / fHeight;
+ 				const uint32_t *row = (const uint32_t *)(fPixels +
+ 				    (uint64_t)yy * fRowBytes);
+ 				volatile const uint8_t *prow = (volatile const uint8_t *)(fPanel +
+@@ -648,11 +649,46 @@
+ 					}
+ 				}
+ 			}
+-			IOLog("SWEET FB: frame shadow %u/%u panel %u/%u nonzero first %08x\n",
+-			    pz, ps, dpz, dps, first);
+-			IOLog("SWEET FB: bands shadow %u %u %u %u %u %u %u %u panel %u %u %u %u %u %u %u %u\n",
+-			    sb[0], sb[1], sb[2], sb[3], sb[4], sb[5], sb[6], sb[7],
+-			    pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6], pb[7]);
++			for (uint32_t b = 0; b < 16; b++) {
++				if (sb[b] == 0 && pz > ps / 16) {
++					suspect = true;
++				}
++			}
++			if (suspect || (sweet_fb_pixel_logs % 10) == 1) {
++				IOLog("SWEET FB: frame shadow %u/%u panel %u/%u nonzero first %08x\n",
++				    pz, ps, dpz, dps, first);
++				IOLog("SWEET FB: bands shadow %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
++				    sb[0], sb[1], sb[2], sb[3], sb[4], sb[5], sb[6], sb[7],
++				    sb[8], sb[9], sb[10], sb[11], sb[12], sb[13], sb[14], sb[15]);
++				IOLog("SWEET FB: bands panel %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
++				    pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6], pb[7],
++				    pb[8], pb[9], pb[10], pb[11], pb[12], pb[13], pb[14], pb[15]);
++			}
++			if (suspect) {
++				static uint32_t thumb_logs;
++
++				if (thumb_logs++ >= 40) {
++					suspect = false;
++				}
++			}
++			if (suspect) {
++				for (uint32_t ty = 0; ty < 16; ty++) {
++					char line[33];
++					const uint32_t *row = (const uint32_t *)(fPixels +
++					    (uint64_t)(ty * fHeight / 16) * fRowBytes);
++
++					for (uint32_t tx = 0; tx < 32; tx++) {
++						uint32_t v = row[tx * fWidth / 32];
++						uint32_t lum = (v & 0xff) + ((v >> 8) & 0xff) * 2 +
++						    ((v >> 16) & 0xff) * 4;
++						uint32_t idx = lum / 220;
++
++						line[tx] = " .:-=+*#%@"[idx > 9 ? 9 : idx];
++					}
++					line[32] = 0;
++					IOLog("SWEET FB: thumb %s\n", line);
++				}
++			}
+ 		}
+ 	}
+ #endif
